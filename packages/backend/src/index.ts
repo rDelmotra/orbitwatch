@@ -1,0 +1,73 @@
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import compression from 'compression';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import tleRouter from './routes/tle.js';
+import { isCacheFresh, readVersion } from './cache/file-cache.js';
+import { scheduleTLEUpdater } from './cron/tle-updater.js';
+import { logger } from './utils/logger.js';
+
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
+const isProd = process.env.NODE_ENV === 'production';
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+
+// Security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.)
+app.use(helmet());
+
+// CORS — restrict to frontend domain in production, allow all in dev.
+const corsOrigin = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+  : '*';
+app.use(cors({ origin: corsOrigin }));
+
+// Rate limiting on API routes — prevents abuse of the large TLE payload.
+app.use('/api', rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15 minutes
+  max: 100,                   // 100 requests per window per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' },
+}));
+
+// Gzip all JSON responses.  For the full TLE dataset (~4–6 MB uncompressed)
+// this reduces payload to ~500 KB–1 MB.
+app.use(compression());
+
+app.use(express.json());
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
+app.use('/api/tle', tleRouter);
+
+// GET /health — used by load balancers and uptime monitors
+app.get('/health', (_req, res) => {
+  const version = readVersion();
+  res.json({
+    status: 'ok',
+    lastUpdate: version?.version ?? null,
+    objectCount: version?.count ?? 0,
+    uptime: Math.floor(process.uptime()),
+  });
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+app.listen(PORT, () => {
+  logger.info(`OrbitWatch backend listening on port ${PORT}`);
+
+  // If the cache is missing or older than the 24h TTL, kick off an immediate fetch.
+  // The cron job is always scheduled so subsequent refreshes happen daily at 02:00 UTC.
+  const needsImmediateFetch = !isCacheFresh();
+  scheduleTLEUpdater(needsImmediateFetch);
+
+  if (!needsImmediateFetch) {
+    const version = readVersion();
+    logger.info(`Serving cached data: ${version?.count} objects, version=${version?.version}`);
+  }
+});
+
+export default app;
