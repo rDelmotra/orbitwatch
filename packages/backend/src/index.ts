@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
@@ -8,6 +10,8 @@ import tleRouter from './routes/tle.js';
 import { isCacheFresh, readVersion } from './cache/file-cache.js';
 import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { logger } from './utils/logger.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.set('trust proxy', 1);
@@ -54,6 +58,15 @@ app.get('/health', (_req, res) => {
     uptime: Math.floor(process.uptime()),
   });
 });
+
+// ── Static frontend (production only) ────────────────────────────────────────
+if (isProd) {
+  const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+  app.use(express.static(frontendDist));
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
