@@ -10,6 +10,7 @@ import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { logger } from './utils/logger.js';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 const isProd = process.env.NODE_ENV === 'production';
 
