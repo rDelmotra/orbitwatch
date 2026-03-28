@@ -59,6 +59,28 @@ export function HUD() {
       <span>{utc}</span>
       <span>Tracking {objectCount.toLocaleString()} objects</span>
       {freshness && <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '11px' }}>{freshness}</span>}
+      <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: '10px', marginTop: '4px', pointerEvents: 'auto' }}>
+        Data provided by{' '}
+        <a
+          href="https://www.space-track.org"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'inherit', textDecoration: 'underline' }}
+        >
+          Space-Track.org
+        </a>
+      </span>
+      <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: '10px', marginTop: '2px', pointerEvents: 'auto' }}>
+        Data courtesy of{' '}
+        <a
+          href="https://celestrak.org"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: 'inherit', textDecoration: 'underline' }}
+        >
+          CelesTrak
+        </a>
+      </span>
     </div>
   );
 }

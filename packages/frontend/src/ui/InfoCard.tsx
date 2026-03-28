@@ -67,9 +67,13 @@ function Row({ label, value }: { label: string; value: string | number | null })
 export function InfoCard() {
   const selectedSatellite = useStore((s) => s.selectedSatellite);
   const selectedAltitude = useStore((s) => s.selectedAltitude);
+  const selectedIndex = useStore((s) => s.selectedIndex);
   const setSelectedSatellite = useStore((s) => s.setSelectedSatellite);
   const showOrbitTrail = useStore((s) => s.showOrbitTrail);
   const setShowOrbitTrail = useStore((s) => s.setShowOrbitTrail);
+  const triggerFlyTo = useStore((s) => s.triggerFlyTo);
+  const cameraMode = useStore((s) => s.cameraMode);
+  const setCameraMode = useStore((s) => s.setCameraMode);
 
   if (!selectedSatellite) return null;
 
@@ -107,23 +111,48 @@ export function InfoCard() {
       <Row label="Launch" value={s.launchDate} />
       <Row label="Epoch" value={s.epoch?.slice(0, 10) ?? null} />
 
-      <button
-        onClick={() => setShowOrbitTrail(!showOrbitTrail)}
-        style={{
-          width: '100%',
-          marginTop: 10,
-          padding: '6px 0',
-          background: showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)',
-          border: `1px solid ${showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)'}`,
-          borderRadius: 4,
-          color: showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
-          fontFamily: 'monospace',
-          fontSize: '11px',
-          cursor: 'pointer',
-        }}
-      >
-        {showOrbitTrail ? 'Hide orbit' : 'Show orbit'}
-      </button>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button
+          onClick={() => {
+            if (cameraMode === 'flying' || cameraMode === 'following') {
+              setCameraMode('returning');
+            } else if (cameraMode === 'returning') {
+              setCameraMode('free');
+            } else {
+              triggerFlyTo?.(selectedIndex!);
+            }
+          }}
+          style={{
+            flex: 1,
+            padding: '6px 0',
+            background: cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+            border: `1px solid ${cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
+            borderRadius: 4,
+            color: cameraMode !== 'free' ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+            fontFamily: 'monospace',
+            fontSize: '11px',
+            cursor: 'pointer',
+          }}
+        >
+          {cameraMode === 'following' ? 'Unfollow' : cameraMode === 'flying' ? 'Cancel' : cameraMode === 'returning' ? 'Stop' : 'Go to'}
+        </button>
+        <button
+          onClick={() => setShowOrbitTrail(!showOrbitTrail)}
+          style={{
+            flex: 1,
+            padding: '6px 0',
+            background: showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+            border: `1px solid ${showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)'}`,
+            borderRadius: 4,
+            color: showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+            fontFamily: 'monospace',
+            fontSize: '11px',
+            cursor: 'pointer',
+          }}
+        >
+          {showOrbitTrail ? 'Hide orbit' : 'Show orbit'}
+        </button>
+      </div>
     </div>
   );
 }

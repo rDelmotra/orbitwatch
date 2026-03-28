@@ -8,6 +8,8 @@ uniform float uPixelRatio;
 uniform float uCameraDistance;
 uniform vec3 uBaseColor;
 uniform float uT;
+uniform float uSelectedIndex;    // -1.0 = no selection
+uniform float uTimeSinceArrival; // seconds since camera arrived; -1.0 = no pulse
 
 varying vec3 vColor;
 varying vec3 vPickId;
@@ -24,9 +26,26 @@ void main() {
   gl_Position = projectionMatrix * viewPos;
 
   float dist = length(viewPos.xyz);
-  gl_PointSize = (3.0 * uPixelRatio * size) / dist * uCameraDistance;
-  gl_PointSize = clamp(gl_PointSize, 1.5, 20.0);
+  float pointSize = (3.0 * uPixelRatio * size) / dist * uCameraDistance;
 
-  vColor = color * uBaseColor;
+  // gl_VertexID is available in WebGL 2 / GLSL ES 3.00 (Three.js r165+)
+  bool isSelected = uSelectedIndex >= 0.0 && abs(float(gl_VertexID) - uSelectedIndex) < 0.5;
+
+  if (isSelected) {
+    float sizeBoost = 2.5;
+
+    // Triple pulse: 3 cycles over 1.5 seconds (2 Hz → ω = 4π ≈ 12.566)
+    if (uTimeSinceArrival >= 0.0 && uTimeSinceArrival < 1.5) {
+      float pulse = sin(uTimeSinceArrival * 12.566);
+      sizeBoost = 2.5 + 1.5 * pulse; // oscillates [1.0, 4.0]
+    }
+
+    pointSize *= max(sizeBoost, 1.0);
+    vColor = vec3(0.0, 0.898, 1.0); // cyan override for selected object
+  } else {
+    vColor = color * uBaseColor;
+  }
+
+  gl_PointSize = clamp(pointSize, 1.5, 20.0);
   vPickId = pickId;
 }

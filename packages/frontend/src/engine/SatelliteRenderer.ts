@@ -56,6 +56,8 @@ export class SatelliteRenderer {
         uCameraDistance: { value: 5.0 },
         uBaseColor: { value: new THREE.Vector3(1, 1, 1) },
         uT: { value: 0.0 },
+        uSelectedIndex: { value: -1.0 },
+        uTimeSinceArrival: { value: -1.0 },
       },
       transparent: true,
       depthWrite: false,
@@ -130,6 +132,23 @@ export class SatelliteRenderer {
   updateUniforms(cameraDistance: number, pixelRatio: number): void {
     this.material.uniforms.uCameraDistance.value = cameraDistance;
     this.material.uniforms.uPixelRatio.value = pixelRatio;
+  }
+
+  updateSelectedUniforms(selectedIndex: number, timeSinceArrival: number): void {
+    this.material.uniforms.uSelectedIndex.value = selectedIndex;
+    this.material.uniforms.uTimeSinceArrival.value = timeSinceArrival;
+  }
+
+  /** Returns the GPU-equivalent interpolated world position for a single object. */
+  getInterpolatedPosition(index: number, t: number): THREE.Vector3 {
+    const prevArr = this.prevPosAttr.array as Float32Array;
+    const currArr = this.currPosAttr.array as Float32Array;
+    const i3 = index * 3;
+    return new THREE.Vector3(
+      prevArr[i3]     + (currArr[i3]     - prevArr[i3])     * t,
+      prevArr[i3 + 1] + (currArr[i3 + 1] - prevArr[i3 + 1]) * t,
+      prevArr[i3 + 2] + (currArr[i3 + 2] - prevArr[i3 + 2]) * t,
+    );
   }
 
   applyFilters(

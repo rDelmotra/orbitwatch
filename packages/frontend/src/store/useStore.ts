@@ -2,10 +2,12 @@ import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
+export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
 
 interface AppState {
   loadingPhase: LoadingPhase;
   loadingError: string | null;
+  cameraMode: CameraMode;
   objectCount: number;
   categoryCounts: Record<ObjectCategory, number>;
   dataVersion: string | null;
@@ -13,6 +15,8 @@ interface AppState {
 
   catalogData: EnrichedTLEObject[];
   selectByIndex: ((index: number) => void) | null;
+  triggerFlyTo: ((index: number) => void) | null;
+  triggerResetCamera: (() => void) | null;
 
   selectedIndex: number | null;
   selectedSatellite: EnrichedTLEObject | null;
@@ -33,6 +37,9 @@ interface AppState {
   visibleCategoryCounts: Record<ObjectCategory, number>;
   visibleRegimeCounts: Record<OrbitalRegime, number>;
 
+  setCameraMode: (mode: CameraMode) => void;
+  setTriggerFlyTo: (fn: (index: number) => void) => void;
+  setTriggerResetCamera: (fn: () => void) => void;
   setLoadingPhase: (phase: LoadingPhase) => void;
   setLoadingError: (error: string) => void;
   setCatalogInfo: (info: {
@@ -63,6 +70,7 @@ interface AppState {
 export const useStore = create<AppState>((set) => ({
   loadingPhase: 'fetching',
   loadingError: null,
+  cameraMode: 'free',
   objectCount: 0,
   categoryCounts: {
     active_satellite: 0,
@@ -76,6 +84,8 @@ export const useStore = create<AppState>((set) => ({
 
   catalogData: [],
   selectByIndex: null,
+  triggerFlyTo: null,
+  triggerResetCamera: null,
 
   selectedIndex: null,
   selectedSatellite: null,
@@ -108,6 +118,9 @@ export const useStore = create<AppState>((set) => ({
   },
   visibleRegimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
 
+  setCameraMode: (mode) => set({ cameraMode: mode }),
+  setTriggerFlyTo: (fn) => set({ triggerFlyTo: fn }),
+  setTriggerResetCamera: (fn) => set({ triggerResetCamera: fn }),
   setLoadingPhase: (phase) => set({ loadingPhase: phase }),
   setLoadingError: (error) => set({ loadingError: error }),
   setCatalogInfo: (info) =>
@@ -139,12 +152,16 @@ export const useStore = create<AppState>((set) => ({
   setCatalogData: (data) => set({ catalogData: data }),
   setSelectByIndex: (fn) => set({ selectByIndex: fn }),
   setSelectedSatellite: (index, data, altitude) =>
-    set({
+    set((state) => ({
       selectedIndex: index,
       selectedSatellite: data,
       selectedAltitude: altitude ?? null,
       showOrbitTrail: false,
-    }),
+      // Deselecting during tracking: smooth return to Earth-centered view
+      ...(index === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')
+        ? { cameraMode: 'returning' as CameraMode }
+        : {}),
+    })),
   setShowOrbitTrail: (show) => set({ showOrbitTrail: show }),
   setHover: (name, screenX, screenY) =>
     set({

@@ -8,6 +8,7 @@ import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, Orb
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
+import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
 
 const EARTH_RADIUS_KM = 6371;
@@ -34,9 +35,16 @@ export class Engine {
   private lastHoverTime = 0;
   private static readonly HOVER_THROTTLE_MS = 100;
   private orbitTrailRenderer: OrbitTrailRenderer;
+  private cameraController: CameraController;
+  private arrivalTime = -1; // performance.now() when camera arrived; -1 = none
+  private cameraModeUnsub: (() => void) | null = null;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
   private devValidation: DevValidation | null = null;
+  private returnEndPos: THREE.Vector3 | null = null;
+  private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
+  private useHardReset = false;
+  private dragExitedFollowing = false;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -79,6 +87,71 @@ export class Engine {
 
     // ── Orbit trail ─────────────────────────────────────────────────────────
     this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
+
+    // ── Camera controller ────────────────────────────────────────────────────
+    this.cameraController = new CameraController(this.camera);
+
+    // Exit following mode when user begins an OrbitControls interaction (drag)
+    this.controls.addEventListener('start', this.onControlsStart);
+
+    // Centralized camera mode transitions
+    let prevCameraMode = useStore.getState().cameraMode;
+    this.cameraModeUnsub = useStore.subscribe((state) => {
+      if (state.cameraMode === prevCameraMode) return;
+      prevCameraMode = state.cameraMode;
+
+      // Any transition to 'free': cancel animation, re-enable controls
+      if (state.cameraMode === 'free') {
+        this.cameraController.cancel();
+        this.controls.enabled = true;
+        this.arrivalTime = -1;
+
+        // Context-aware controls.target on transition to free
+        if (this.dragExitedFollowing) {
+          // target already set to satellite pos in onControlsStart, keep it
+          // reset the flag for next time
+          this.dragExitedFollowing = false;
+        } else if (this.returnEndPos) {
+          // finished returning animation, aim at Earth
+          this.controls.target.set(0, 0, 0);
+          this.returnEndPos = null;
+        }
+      }
+
+      // Entering 'returning': disable controls and start return animation
+      if (state.cameraMode === 'returning') {
+        this.cameraController.cancel();
+        this.controls.enabled = false;
+        this.arrivalTime = -1;
+
+        // Both contextual and hard reset need the start timer initialized
+        this.cameraController.returnToHome(this.controls.target);
+
+        if (this.useHardReset) {
+          this.returnEndPos = HOME_POSITION.clone();
+          this.returnEndTarget.copy(HOME_TARGET);
+          this.useHardReset = false; // reset flag
+        } else {
+          // Contextual pullback
+          const dir = this.camera.position.clone().normalize();
+          const currentDistance = this.camera.position.length();
+          const targetDist = Math.max(currentDistance, HOME_POSITION.length());
+          this.returnEndPos = dir.multiplyScalar(targetDist);
+          this.returnEndTarget.set(0, 0, 0);
+        }
+      }
+
+      // Entering 'flying': controls disabled (Engine.flyToSatellite starts animation)
+      if (state.cameraMode === 'flying') {
+        this.controls.enabled = false;
+      }
+
+      // Entering 'following': controls disabled so OrbitControls doesn't fire
+      // 'start' on clicks. Drag exit is handled in onPointerMove instead.
+      if (state.cameraMode === 'following') {
+        this.controls.enabled = false;
+      }
+    });
 
     // ── Clock ─────────────────────────────────────────────────────────────────
     this.clock = new THREE.Clock();
@@ -139,6 +212,8 @@ export class Engine {
       // Expose catalog data and selectByIndex to the UI via the store
       useStore.getState().setCatalogData(catalogData);
       useStore.getState().setSelectByIndex((index: number) => this.selectByIndex(index));
+      useStore.getState().setTriggerFlyTo((index: number) => this.flyToSatellite(index));
+      useStore.getState().setTriggerResetCamera(() => this.resetCamera());
 
       // Initialize per-vertex colors (by category) and pick IDs
       this.satelliteRenderer.initFromCatalog(catalogData);
@@ -273,13 +348,60 @@ export class Engine {
     this.earthRenderer.object.rotation.y = getGAST(now);
 
     // GPU-side interpolation: compute t from time since last propagation tick
+    let uT = 0.0;
     if (this.lastTickTime > 0) {
       const elapsed = performance.now() - this.lastTickTime;
-      this.satelliteRenderer.material.uniforms.uT.value = Math.min(elapsed / 1000.0, 1.0);
+      uT = Math.min(elapsed / 1000.0, 1.0);
+      this.satelliteRenderer.material.uniforms.uT.value = uT;
     }
 
     this.devValidation?.tickFrame();
-    this.controls.update();
+
+    // ── Camera mode handling ────────────────────────────────────────────────
+    // CRITICAL: controls.update() only runs in 'free' mode. In all other modes
+    // the CameraController directly sets camera.position and lookAt, and we keep
+    // controls.target synced so OrbitControls can resume cleanly on exit.
+    const store = useStore.getState();
+    const cameraMode = store.cameraMode;
+    const selectedIdx = store.selectedIndex;
+
+    if (cameraMode === 'free') {
+      this.controls.update();
+
+    } else if (cameraMode === 'flying' && selectedIdx !== null) {
+      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
+      const radialDir = satPos.clone().normalize();
+      const endCamPos = satPos.clone().add(
+        radialDir.multiplyScalar(this.cameraController.followOffsetDist),
+      );
+      const done = this.cameraController.updateAnim(endCamPos, satPos, this.controls.target);
+      if (done) {
+        store.setCameraMode('following');
+        this.arrivalTime = performance.now();
+      }
+
+    } else if (cameraMode === 'following' && selectedIdx !== null) {
+      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
+      this.cameraController.updateFollow(satPos, this.controls.target);
+
+    } else if (cameraMode === 'returning') {
+      const done = this.cameraController.updateAnim(
+        this.returnEndPos || HOME_POSITION, this.returnEndTarget, this.controls.target,
+      );
+      if (done) {
+        store.setCameraMode('free');
+      }
+    }
+
+    // ── Selected-object shader uniforms ──────────────────────────────────────
+    const timeSinceArrival = this.arrivalTime > 0
+      ? (performance.now() - this.arrivalTime) / 1000
+      : -1.0;
+    this.satelliteRenderer.updateSelectedUniforms(
+      selectedIdx !== null ? selectedIdx : -1,
+      timeSinceArrival,
+    );
+
     this.earthRenderer.update(delta, this.camera);
     this.satelliteRenderer.updateUniforms(
       this.camera.position.length(),
@@ -298,6 +420,28 @@ export class Engine {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
+    // Drag detection for all non-free modes (controls are disabled in these modes).
+    const mode = useStore.getState().cameraMode;
+    if (this.pointerDownPos && mode !== 'free') {
+      const dx = e.clientX - this.pointerDownPos.x;
+      const dy = e.clientY - this.pointerDownPos.y;
+      if (dx * dx + dy * dy > 25) {
+        if (mode === 'following') {
+          // User is dragging while following — exit to free orbit around satellite
+          this.dragExitedFollowing = true;
+          const selectedIdx = useStore.getState().selectedIndex;
+          if (selectedIdx !== null) {
+            const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
+            const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
+            this.controls.target.copy(satPos);
+          }
+          this.controls.enabled = true;
+        }
+        useStore.getState().setCameraMode('free');
+        this.pointerDownPos = null;
+      }
+    }
+
     const now = performance.now();
     if (now - this.lastHoverTime < Engine.HOVER_THROTTLE_MS) return;
     this.lastHoverTime = now;
@@ -331,6 +475,7 @@ export class Engine {
     // Ignore drags: only pick if pointer moved less than 5px
     const dx = e.clientX - this.pointerDownPos.x;
     const dy = e.clientY - this.pointerDownPos.y;
+    this.pointerDownPos = null;
     if (dx * dx + dy * dy > 25) return;
 
     const canvas = this.renderer.domElement;
@@ -402,12 +547,71 @@ export class Engine {
     const magnitude = Math.sqrt(x * x + y * y + z * z);
     const altitudeKm = (magnitude * EARTH_RADIUS_KM) - EARTH_RADIUS_KM;
 
-    useStore.getState().setSelectedSatellite(
-      index,
-      this.catalogData[index],
-      Math.round(altitudeKm),
-    );
+    const store = useStore.getState();
+
+    // Auto-redirect fly-to on satellite change — start animation directly
+    // (can't use flyToSatellite because its guard would bail after selectedIndex is updated)
+    const isTracking = store.cameraMode === 'flying' || store.cameraMode === 'following';
+    if (isTracking && store.selectedIndex !== null && store.selectedIndex !== index) {
+      store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
+      const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
+      const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
+      this.arrivalTime = -1;
+      this.cameraController.flyTo(satPos, this.controls.target);
+      store.setCameraMode('flying');
+      return;
+    }
+
+    // Clicking a different object while returning exits camera tracking
+    if (store.cameraMode !== 'free' && store.selectedIndex !== index) {
+      store.setCameraMode('free');
+    }
+
+    store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
   }
+
+  flyToSatellite(index: number): void {
+    if (index < 0 || index >= this.catalogData.length || !this.firstPositionReceived) return;
+
+    const store = useStore.getState();
+    // Already flying/following this satellite — no-op
+    if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
+      && store.selectedIndex === index) return;
+
+    // Ensure satellite is selected
+    if (store.selectedIndex !== index) {
+      this.selectByIndex(index);
+    }
+
+    const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
+    const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
+
+    // Start fly animation — subscription handles controls.enabled
+    this.arrivalTime = -1;
+    this.cameraController.flyTo(satPos, this.controls.target);
+    store.setCameraMode('flying');
+  }
+
+  resetCamera(): void {
+    const store = useStore.getState();
+    this.useHardReset = true;
+    if (store.cameraMode !== 'returning') {
+      store.setCameraMode('returning');
+    } else {
+      // Re-trigger if already returning (e.g. from a contextual deselect)
+      this.returnEndPos = HOME_POSITION.clone();
+      this.returnEndTarget.copy(HOME_TARGET);
+      this.cameraController.returnToHome(this.controls.target);
+      this.useHardReset = false;
+    }
+  }
+
+  /** OrbitControls 'start' event — reserved for future use.
+   *  Drag exit from following is handled in onPointerMove (controls are disabled
+   *  in following mode so this event won't fire during following). */
+  private onControlsStart = (): void => {
+    // no-op
+  };
 
   private onResize = (): void => {
     const canvas = this.renderer.domElement;
@@ -425,6 +629,8 @@ export class Engine {
     if (this.propagationInterval !== null) {
       clearInterval(this.propagationInterval);
     }
+    this.controls.removeEventListener('start', this.onControlsStart);
+    this.cameraModeUnsub?.();
     this.filterUnsub?.();
     this.trailUnsub?.();
     this.worker?.terminate();
