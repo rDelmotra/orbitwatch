@@ -1,7 +1,8 @@
 attribute vec3 previousPosition;
 attribute vec3 currentPosition;
 attribute vec3 color;
-attribute float size;
+attribute float previousSize;
+attribute float currentSize;
 attribute vec3 pickId;
 
 uniform float uPixelRatio;
@@ -15,7 +16,8 @@ varying vec3 vColor;
 varying vec3 vPickId;
 
 void main() {
-  if (size < 0.01) {
+  float lerpedSize = mix(previousSize, currentSize, uT);
+  if (lerpedSize < 0.01) {
     gl_Position = vec4(0.0, 0.0, -999.0, 1.0);
     gl_PointSize = 0.0;
     return;
@@ -26,7 +28,7 @@ void main() {
   gl_Position = projectionMatrix * viewPos;
 
   float dist = length(viewPos.xyz);
-  float pointSize = (3.0 * uPixelRatio * size) / dist * uCameraDistance;
+  float pointSize = (3.0 * uPixelRatio * lerpedSize) / dist * uCameraDistance;
 
   // gl_VertexID is available in WebGL 2 / GLSL ES 3.00 (Three.js r165+)
   bool isSelected = uSelectedIndex >= 0.0 && abs(float(gl_VertexID) - uSelectedIndex) < 0.5;

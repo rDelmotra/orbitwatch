@@ -96,9 +96,34 @@ export function FilterPanel() {
   const visibleRegCounts = useStore((s) => s.visibleRegimeCounts);
   const toggleCategory = useStore((s) => s.toggleCategoryFilter);
   const toggleRegime = useStore((s) => s.toggleRegimeFilter);
+  const visibilityMode = useStore((s) => s.visibilityMode);
+  const observerLocation = useStore((s) => s.observerLocation);
+  const setVisibilityMode = useStore((s) => s.setVisibilityMode);
+  const setObserverLocation = useStore((s) => s.setObserverLocation);
+
   const [open, setOpen] = useState(true);
 
   if (loadingPhase !== 'ready') return null;
+
+  const totalVisible = Object.values(visibleCatCounts).reduce((a, b) => a + b, 0);
+
+  const handleRequestLocation = () => {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        // Convert altitude from meters to KM if available, otherwise assume roughly 0
+        const altKm = pos.coords.altitude ? pos.coords.altitude / 1000 : 0.0;
+        setObserverLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, alt: altKm });
+        setVisibilityMode('visual');
+      },
+      (err) => {
+        alert(`Unable to retrieve location: ${err.message}`);
+      }
+    );
+  };
 
   return (
     <>
@@ -158,6 +183,46 @@ export function FilterPanel() {
         >
           &times;
         </button>
+
+        <div style={sectionHeaderStyle}>Local Visibility</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+           {observerLocation === null ? (
+               <button onClick={handleRequestLocation} style={{
+                   background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.2)', color: '#fff', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 11
+               }}>
+                   📍 Use My Location
+               </button>
+           ) : (
+               <>
+                 <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
+                   Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
+                 </div>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'all' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
+                    <Toggle on={visibilityMode === 'all'} onToggle={() => setVisibilityMode('all')} />
+                    <span>Show All (Global)</span>
+                    {visibilityMode === 'all' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
+                 </div>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'radio' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
+                    <Toggle on={visibilityMode === 'radio'} onToggle={() => setVisibilityMode('radio')} />
+                    <span>Radio Pass (&gt;10° Elev)</span>
+                    {visibilityMode === 'radio' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
+                 </div>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'visual' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
+                    <Toggle on={visibilityMode === 'visual'} onToggle={() => setVisibilityMode('visual')} />
+                    <span title="CelesTrak curated list, <2000km, sunlit, dark sky">Naked Eye Stargazer</span>
+                    {visibilityMode === 'visual' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
+                 </div>
+               </>
+           )}
+        </div>
+
+        <div
+          style={{
+            height: 1,
+            background: 'rgba(255, 255, 255, 0.08)',
+            margin: '12px 0',
+          }}
+        />
 
         {/* Object Type section */}
         <div style={sectionHeaderStyle}>Object Type</div>

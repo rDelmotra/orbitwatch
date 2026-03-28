@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EarthRenderer } from './EarthRenderer';
 import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
+import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
+import { fetchVisualNoradIds } from '../data/visualList';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
 import { useStore } from '../store/useStore';
@@ -45,6 +47,8 @@ export class Engine {
   private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
   private useHardReset = false;
   private dragExitedFollowing = false;
+  private visualNoradIds: Set<number> = new Set();
+  private observerMarker: THREE.Mesh | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -173,7 +177,11 @@ export class Engine {
     try {
       store.setLoadingPhase('fetching');
       const apiUrl = import.meta.env.VITE_API_URL ?? '';
-      const res = await fetch(`${apiUrl}/api/tle/all`);
+      const [res, visualIds] = await Promise.all([
+        fetch(`${apiUrl}/api/tle/all`),
+        fetchVisualNoradIds(),
+      ]);
+      this.visualNoradIds = visualIds;
       if (!res.ok) throw new Error(`TLE fetch failed: ${res.status}`);
 
       const response = await res.json();
@@ -242,25 +250,54 @@ export class Engine {
       // Subscribe to filter changes from the UI
       let prevCatFilters = useStore.getState().categoryFilters;
       let prevRegFilters = useStore.getState().regimeFilters;
+      let prevVisMode = useStore.getState().visibilityMode;
+      let prevObsLoc = useStore.getState().observerLocation;
+
       this.filterUnsub = useStore.subscribe((state) => {
         if (
           state.categoryFilters !== prevCatFilters ||
-          state.regimeFilters !== prevRegFilters
+          state.regimeFilters !== prevRegFilters ||
+          state.visibilityMode !== prevVisMode ||
+          state.observerLocation !== prevObsLoc
         ) {
+          const obsLocChanged = state.observerLocation !== prevObsLoc;
           prevCatFilters = state.categoryFilters;
           prevRegFilters = state.regimeFilters;
+          prevVisMode = state.visibilityMode;
+          prevObsLoc = state.observerLocation;
+
+          let observerPos: THREE.Vector3 | null = null;
+          if (state.visibilityMode !== 'all' && state.observerLocation) {
+             observerPos = getObserverScenePosition(
+               state.observerLocation.lat,
+               state.observerLocation.lon,
+               state.observerLocation.alt,
+               new Date()
+             );
+          }
+          const sunDir = getSunDirection(new Date());
+
           const counts = this.satelliteRenderer.applyFilters(
             this.catalogData,
             state.categoryFilters,
             state.regimeFilters,
+            observerPos,
+            sunDir,
+            state.visibilityMode,
+            this.visualNoradIds
           );
           useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+
+          // Update observer marker when location changes
+          if (obsLocChanged) {
+            this.updateObserverMarker(state.observerLocation);
+          }
 
           // Clear selection if filtered out
           const sel = useStore.getState().selectedIndex;
           if (sel !== null && sel < this.catalogData.length) {
-            const obj = this.catalogData[sel];
-            if (!state.categoryFilters[obj.category] || !state.regimeFilters[obj.regime]) {
+            const sizeArr = this.satelliteRenderer.mesh.geometry.getAttribute('size').array as Float32Array;
+            if (sizeArr[sel] < 0.01) {
               useStore.getState().setSelectedSatellite(null, null);
             }
           }
@@ -304,11 +341,33 @@ export class Engine {
             this.worker!.postMessage({ type: 'PROPAGATE', timestamp: Date.now() });
           }, 1000);
         } else if (msg.type === 'POSITIONS') {
-          this.satelliteRenderer.updatePositions(
+          const state = useStore.getState();
+          let observerPos: THREE.Vector3 | null = null;
+          if (state.visibilityMode !== 'all' && state.observerLocation) {
+             observerPos = getObserverScenePosition(
+               state.observerLocation.lat,
+               state.observerLocation.lon,
+               state.observerLocation.alt,
+               new Date()
+             );
+          }
+          const sunDir = getSunDirection(new Date());
+
+          const counts = this.satelliteRenderer.updatePositions(
             msg.positions,
             msg.validFlags,
             this.objectCount,
+            observerPos,
+            sunDir,
+            state.visibilityMode,
+            this.catalogData,
+            state.categoryFilters,
+            state.regimeFilters,
+            this.visualNoradIds
           );
+          
+          useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+
           this.lastTickTime = performance.now();
           this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
@@ -606,6 +665,29 @@ export class Engine {
     }
   }
 
+  private updateObserverMarker(loc: { lat: number; lon: number; alt: number } | null): void {
+    if (loc) {
+      if (!this.observerMarker) {
+        const geo = new THREE.SphereGeometry(0.03, 16, 16);
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x00e5ff,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false,
+        });
+        this.observerMarker = new THREE.Mesh(geo, mat);
+        this.observerMarker.renderOrder = 1;
+        this.earthRenderer.object.add(this.observerMarker);
+      }
+      this.observerMarker.position.copy(getObserverECEFPosition(loc.lat, loc.lon));
+    } else if (this.observerMarker) {
+      this.earthRenderer.object.remove(this.observerMarker);
+      this.observerMarker.geometry.dispose();
+      (this.observerMarker.material as THREE.Material).dispose();
+      this.observerMarker = null;
+    }
+  }
+
   /** OrbitControls 'start' event — reserved for future use.
    *  Drag exit from following is handled in onPointerMove (controls are disabled
    *  in following mode so this event won't fire during following). */
@@ -639,6 +721,12 @@ export class Engine {
     canvas.removeEventListener('pointerup', this.onPointerUp);
     canvas.removeEventListener('pointermove', this.onPointerMove);
     window.removeEventListener('resize', this.onResize);
+    if (this.observerMarker) {
+      this.earthRenderer.object.remove(this.observerMarker);
+      this.observerMarker.geometry.dispose();
+      (this.observerMarker.material as THREE.Material).dispose();
+      this.observerMarker = null;
+    }
     this.gpuPicker?.dispose();
     this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();

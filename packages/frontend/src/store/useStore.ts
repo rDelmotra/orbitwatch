@@ -3,6 +3,7 @@ import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/t
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
+export type VisibilityMode = 'all' | 'radio' | 'visual';
 
 interface AppState {
   loadingPhase: LoadingPhase;
@@ -30,6 +31,9 @@ interface AppState {
   clusterItems: { index: number; data: EnrichedTLEObject; altitude: number }[];
   clusterScreenX: number;
   clusterScreenY: number;
+
+  observerLocation: { lat: number; lon: number; alt: number } | null;
+  visibilityMode: VisibilityMode;
 
   categoryFilters: Record<ObjectCategory, boolean>;
   regimeFilters: Record<OrbitalRegime, boolean>;
@@ -65,6 +69,8 @@ interface AppState {
   setHover: (name: string | null, screenX?: number, screenY?: number) => void;
   setCluster: (items: { index: number; data: EnrichedTLEObject; altitude: number }[], screenX: number, screenY: number) => void;
   clearCluster: () => void;
+  setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
+  setVisibilityMode: (mode: VisibilityMode) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -99,6 +105,9 @@ export const useStore = create<AppState>((set) => ({
   clusterItems: [],
   clusterScreenX: 0,
   clusterScreenY: 0,
+
+  observerLocation: null,
+  visibilityMode: 'all',
 
   categoryFilters: {
     active_satellite: true,
@@ -176,4 +185,6 @@ export const useStore = create<AppState>((set) => ({
       clusterScreenY: screenY,
     }),
   clearCluster: () => set({ clusterItems: [] }),
+  setObserverLocation: (loc) => set({ observerLocation: loc }),
+  setVisibilityMode: (mode) => set({ visibilityMode: mode }),
 }));
