@@ -72,7 +72,7 @@ export class SatelliteRenderer {
       },
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
     });
 
     this.mesh = new THREE.Points(this.geometry, this.material);

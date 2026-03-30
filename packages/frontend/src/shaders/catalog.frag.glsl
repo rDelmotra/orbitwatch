@@ -1,4 +1,5 @@
 varying vec3 vColor;
+varying float vDistanceFade;
 
 void main() {
   // gl_PointCoord goes from (0,0) to (1,1) across the point quad
@@ -10,10 +11,10 @@ void main() {
   if (dist > 0.5) discard;
 
   // Soft edge: hard center, fades out
-  float alpha = 1.0 - smoothstep(0.2, 0.5, dist);
+  float alpha = (1.0 - smoothstep(0.2, 0.5, dist)) * 0.92 * vDistanceFade;
 
   // Slight brightness boost at center for glow feel
-  float glow = 1.0 + 0.4 * (1.0 - smoothstep(0.0, 0.25, dist));
+  float glow = 0.92 + 0.25 * (1.0 - smoothstep(0.0, 0.25, dist));
 
   gl_FragColor = vec4(vColor * glow, alpha);
 }

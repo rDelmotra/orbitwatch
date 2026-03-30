@@ -14,6 +14,7 @@ uniform float uTimeSinceArrival; // seconds since camera arrived; -1.0 = no puls
 
 varying vec3 vColor;
 varying vec3 vPickId;
+varying float vDistanceFade;
 
 void main() {
   float lerpedSize = mix(previousSize, currentSize, uT);
@@ -28,7 +29,13 @@ void main() {
   gl_Position = projectionMatrix * viewPos;
 
   float dist = length(viewPos.xyz);
-  float pointSize = (3.0 * uPixelRatio * lerpedSize) / dist * uCameraDistance;
+  // Respond to zoom sublinearly, then fade each point by its own camera distance.
+  float cameraScale = pow(max(uCameraDistance, 1.0), 0.55);
+  float distAttenuation = pow(max(dist, 0.0001), 0.72);
+  float pointSize = (2.9 * uPixelRatio * lerpedSize * cameraScale) / distAttenuation;
+  float logDist = log2(dist + 1.0);
+  float sizeFade = 1.0 - smoothstep(log2(5.0), log2(140.0), logDist);
+  float alphaFade = 1.0 - smoothstep(log2(6.0), log2(180.0), logDist);
 
   // gl_VertexID is available in WebGL 2 / GLSL ES 3.00 (Three.js r165+)
   bool isSelected = uSelectedIndex >= 0.0 && abs(float(gl_VertexID) - uSelectedIndex) < 0.5;
@@ -42,12 +49,24 @@ void main() {
       sizeBoost = 2.5 + 1.5 * pulse; // oscillates [1.0, 4.0]
     }
 
+    sizeFade = max(sizeFade, 0.45);
+    alphaFade = max(alphaFade, 0.6);
     pointSize *= max(sizeBoost, 1.0);
     vColor = vec3(0.0, 0.898, 1.0); // cyan override for selected object
   } else {
     vColor = color * uBaseColor;
   }
 
-  gl_PointSize = clamp(pointSize, 1.5, 20.0);
+  pointSize *= pow(max(sizeFade, 0.0), 0.82);
+  if (pointSize < 0.16 || alphaFade < 0.01) {
+    gl_Position = vec4(0.0, 0.0, -999.0, 1.0);
+    gl_PointSize = 0.0;
+    vDistanceFade = 0.0;
+    vPickId = pickId;
+    return;
+  }
+
+  gl_PointSize = clamp(pointSize, 0.65, 20.0);
+  vDistanceFade = alphaFade;
   vPickId = pickId;
 }

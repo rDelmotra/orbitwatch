@@ -21,8 +21,22 @@ void main() {
   gl_Position = projectionMatrix * viewPos;
 
   float dist = length(viewPos.xyz);
-  gl_PointSize = (3.0 * uPixelRatio * size) / dist * uCameraDistance;
-  gl_PointSize = clamp(gl_PointSize * 1.5, 1.5, 30.0);
+  float cameraScale = pow(max(uCameraDistance, 1.0), 0.55);
+  float distAttenuation = pow(max(dist, 0.0001), 0.72);
+  float pointSize = (2.9 * uPixelRatio * size * cameraScale) / distAttenuation;
+  float logDist = log2(dist + 1.0);
+  float sizeFade = 1.0 - smoothstep(log2(5.0), log2(140.0), logDist);
+  float alphaFade = 1.0 - smoothstep(log2(6.0), log2(180.0), logDist);
+
+  pointSize *= pow(max(sizeFade, 0.0), 0.82);
+  if (pointSize < 0.16 || alphaFade < 0.01) {
+    gl_Position = vec4(0.0, 0.0, -999.0, 1.0);
+    gl_PointSize = 0.0;
+    vPickId = pickId;
+    return;
+  }
+
+  gl_PointSize = clamp(pointSize * 1.5, 0.65, 30.0);
 
   vPickId = pickId;
 }

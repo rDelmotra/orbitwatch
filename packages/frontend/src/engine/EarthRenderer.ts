@@ -10,8 +10,15 @@
  *   (Three.js is Y-up; ECI/TEME is Z-up toward the North Pole.)
  *
  * All GLSL is inlined as template literals — no .glsl imports.
+ *
+ * ATMOSPHERE: Single-pass analytical raymarching against concentric spheres.
+ * One draw call replaces the previous 148-shell stack.
  */
 import * as THREE from 'three';
+
+const ATM_INNER_RADIUS = 1.0;   // start at the planet surface
+const ATM_OUTER_RADIUS = 1.12;  // extend well out for visible limb glow
+const ATM_RAY_STEPS = 24;       // a few extra steps for the wider shell
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Earth surface shaders
@@ -43,10 +50,6 @@ varying vec3 vNormal;
 varying vec3 vWorldPos;
 
 void main() {
-  // ── Normal mapping via screen-space derivatives (no tangent attribute needed) ──
-  vec3 normalSample = texture2D(uNormalMap, vUv).xyz * 2.0 - 1.0;
-  normalSample.xy *= 0.85;
-
   vec3 geomN = normalize(vNormal);
   vec3 dPdx  = dFdx(vWorldPos);
   vec3 dPdy  = dFdy(vWorldPos);
@@ -57,34 +60,57 @@ void main() {
   T = normalize(T - dot(T, geomN) * geomN);
   vec3 B = cross(geomN, T);
   mat3 TBN = mat3(T, B, geomN);
-  vec3 N = normalize(TBN * normalSample);
+
+  float height  = texture2D(uNormalMap, vUv).r;
+  float heightX = texture2D(uNormalMap, vUv + dUVdx).r;
+  float heightY = texture2D(uNormalMap, vUv + dUVdy).r;
+  vec3 bumpNormal = normalize(vec3(
+    (height - heightX) * 7.0,
+    (height - heightY) * 7.0,
+    1.0
+  ));
+  vec3 N = normalize(TBN * bumpNormal);
 
   vec3 sunDir  = normalize(uSunDirection);
   vec3 viewDir = normalize(uCameraPos - vWorldPos);
   float NdotL  = dot(N, sunDir);
+  float geomNdotL = dot(geomN, sunDir);
+  float NdotV = max(dot(N, viewDir), 0.0);
+  float horizon = pow(1.0 - max(dot(geomN, viewDir), 0.0), 2.3);
 
-  // ── Soft terminator ───────────────────────────────────────────────────────
-  // Wide smoothstep avoids the harsh lighting cliff
-  float dayBlend = smoothstep(-0.20, 0.15, NdotL);
+  float dayBlend = smoothstep(-0.22, 0.18, geomNdotL);
+  float lambert = max(NdotL, 0.0);
+  float twilight = smoothstep(-0.18, 0.04, geomNdotL) * (1.0 - smoothstep(0.04, 0.28, geomNdotL));
 
   vec3 dayColor   = texture2D(uDayMap,   vUv).rgb;
   vec3 nightColor = texture2D(uNightMap, vUv).rgb;
-
-  // City lights visible in dark zone only; fade before terminator so they
-  // don't bleed into the lit hemisphere
-  float cityBoost = mix(2.5, 0.0, smoothstep(-0.18, 0.02, NdotL));
-  vec3 color = mix(nightColor * cityBoost, dayColor, dayBlend);
-
-  // ── Fresnel-driven ocean specular ─────────────────────────────────────────
-  // F0 = 0.02 (water at normal incidence); glances off more at shallow angles
   float specMask = texture2D(uSpecularMap, vUv).r;
-  float cosV     = max(dot(N, viewDir), 0.0);
-  float F0       = 0.02;
-  float fresnel  = F0 + (1.0 - F0) * pow(1.0 - cosV, 5.0);
-  color += fresnel * specMask * max(NdotL, 0.0) * vec3(0.85, 0.92, 1.0);
 
-  // ── Subtle blue sky-scatter ambient on day side ───────────────────────────
-  color += vec3(0.01, 0.025, 0.05) * dayBlend;
+  vec3 ambient = dayColor * vec3(0.07, 0.09, 0.13);
+  vec3 litDay = dayColor * (0.18 + 0.82 * lambert) + ambient;
+  litDay += dayColor * vec3(0.18, 0.08, 0.03) * twilight;
+
+  vec3 limbColor = mix(vec3(1.0, 0.60, 0.24), vec3(0.40, 0.70, 1.0), smoothstep(-0.05, 0.25, geomNdotL));
+  litDay += limbColor * horizon * smoothstep(-0.18, 0.30, geomNdotL) * 0.22;
+
+  float cityBlend = 1.0 - smoothstep(-0.14, 0.06, geomNdotL);
+  vec3 cityLights = nightColor * cityBlend * (2.0 + 0.5 * horizon);
+  vec3 color = mix(cityLights, litDay, dayBlend);
+
+  vec3 halfDir = normalize(sunDir + viewDir);
+  float specular = pow(max(dot(N, halfDir), 0.0), mix(34.0, 110.0, specMask));
+  float fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+  vec3 specularColor = mix(vec3(0.30, 0.42, 0.58), vec3(0.95, 0.98, 1.0), fresnel);
+  color += specularColor * specular * specMask * lambert * (0.35 + 1.7 * fresnel);
+
+  vec3 hazeColor = mix(vec3(1.0, 0.72, 0.42), vec3(0.56, 0.76, 1.0), smoothstep(-0.06, 0.24, geomNdotL));
+  float hazeBase = 0.08 * smoothstep(-0.18, 0.30, geomNdotL);
+  float hazeLimb = pow(horizon, 0.85) * smoothstep(-0.12, 0.32, geomNdotL);
+  float haze = hazeBase + hazeLimb * 0.34;
+  color = mix(color, hazeColor, haze);
+  color += hazeColor * (hazeBase * 0.03 + hazeLimb * 0.08);
+
+  color += vec3(0.02, 0.05, 0.10) * dayBlend;
 
   gl_FragColor = vec4(color, 1.0);
 }
@@ -118,20 +144,15 @@ void main() {
   vec3  N      = normalize(vNormal);
   float NdotL  = dot(N, sunDir);
 
-  // Fade clouds as they pass into shadow
   float nightFade = smoothstep(-0.15, 0.10, NdotL);
-
   float lit = max(NdotL, 0.0);
 
-  // Base colour: white in full daylight, cool blue-grey in shadow
   vec3 shadowColor = vec3(0.58, 0.63, 0.80);
   vec3 cloudColor  = mix(shadowColor, vec3(1.0), smoothstep(-0.10, 0.25, NdotL));
 
-  // Warm sunset tint near the terminator (peaks at NdotL ≈ 0.05)
   float termFrac  = smoothstep(-0.12, 0.0, NdotL) * (1.0 - smoothstep(0.0, 0.32, NdotL));
   cloudColor      = mix(cloudColor, vec3(1.0, 0.70, 0.38), termFrac * 0.65);
 
-  // Diffuse brightness — keep a small fill so unlit clouds aren't black
   cloudColor *= lit * 0.85 + 0.15;
 
   gl_FragColor = vec4(cloudColor, cloudAlpha * nightFade);
@@ -139,59 +160,141 @@ void main() {
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Atmosphere shaders
+// Raymarched atmosphere — single shell, all math in fragment shader
 // ─────────────────────────────────────────────────────────────────────────────
 const ATM_VERT = /* glsl */ `
-varying vec3 vNormal;
 varying vec3 vWorldPos;
 
 void main() {
   vec4 worldPos = modelMatrix * vec4(position, 1.0);
   vWorldPos  = worldPos.xyz;
-  vNormal    = normalize(mat3(modelMatrix) * normal);
   gl_Position = projectionMatrix * viewMatrix * worldPos;
 }
 `;
 
 const ATM_FRAG = /* glsl */ `
-uniform vec3 uSunDirection;
-uniform vec3 uCameraPos;
+uniform vec3  uSunDirection;
+uniform vec3  uCameraPos;
+uniform float uInnerRadius;
+uniform float uOuterRadius;
+uniform float uStrength;
 
-varying vec3 vNormal;
 varying vec3 vWorldPos;
 
+// ── Ray-sphere intersection ─────────────────────────────────────────────────
+vec2 raySphere(vec3 ro, vec3 rd, float radius) {
+  float b = dot(ro, rd);
+  float c = dot(ro, ro) - radius * radius;
+  float disc = b * b - c;
+  if (disc < 0.0) return vec2(-1.0);
+  float sq = sqrt(disc);
+  return vec2(-b - sq, -b + sq);
+}
+
 void main() {
-  vec3 N       = normalize(vNormal);
-  vec3 viewDir = normalize(uCameraPos - vWorldPos);
-  vec3 sunDir  = normalize(uSunDirection);
+  vec3 rayOrigin = uCameraPos;
+  vec3 rayDir    = normalize(vWorldPos - uCameraPos);
+  vec3 sunDir    = normalize(uSunDirection);
 
-  // Rim falloff — bright at limb, transparent toward centre
-  float rim = pow(1.0 - abs(dot(N, viewDir)), 3.5);
+  // Intersect the view ray with the atmosphere envelope
+  vec2 outerHit = raySphere(rayOrigin, rayDir, uOuterRadius);
+  if (outerHit.y < 0.0) discard;
 
-  // Sun angle at this shell position
-  float sunAngle = dot(normalize(vWorldPos), sunDir);
+  // Does the ray hit the planet body?
+  vec2 innerHit = raySphere(rayOrigin, rayDir, uInnerRadius);
+  bool hitsGround = innerHit.x > 0.0;
 
-  // Colour: deep indigo (night) → warm orange (twilight) → blue-white (day)
-  vec3 dayColor      = vec3(0.22, 0.50, 1.00);
-  vec3 twilightColor = vec3(0.75, 0.28, 0.06);
-  vec3 nightColor    = vec3(0.03, 0.04, 0.14);
+  float tStart = max(0.0, outerHit.x);
+  float tEnd   = outerHit.y;
+  if (hitsGround) {
+    tEnd = innerHit.x;
+  }
+  if (tStart >= tEnd) discard;
 
-  vec3 atmColor;
-  if (sunAngle > 0.15) {
-    atmColor = dayColor;
-  } else if (sunAngle > -0.15) {
-    float t  = (sunAngle + 0.15) / 0.30;
-    atmColor = mix(twilightColor, dayColor, t);
-  } else {
-    float t  = smoothstep(- 0.5, 1.0, sunAngle);
-    atmColor = mix(nightColor, twilightColor, t);
+  // ── Raymarch ────────────────────────────────────────────────────────────
+  // We accumulate optical depth along the ray, then use Beer-Lambert to
+  // convert it to a nonlinear brightness.  With additive blending only RGB
+  // matters (alpha is ignored), so the output is simply the atmosphere
+  // luminance to be added on top of whatever is behind.
+  const int STEPS = ${ATM_RAY_STEPS};
+  float stepSize  = (tEnd - tStart) / float(STEPS);
+  float thickness = uOuterRadius - uInnerRadius;
+
+  vec3  weightedColor = vec3(0.0); // density-weighted colour sum
+  float totalDensity  = 0.0;      // integrated density (optical depth)
+
+  for (int i = 0; i < STEPS; i++) {
+    float t = tStart + (float(i) + 0.5) * stepSize;
+    vec3  samplePos = rayOrigin + rayDir * t;
+    float altitude  = length(samplePos);
+
+    // Normalised height: 0 at planet surface, 1 at outer edge
+    float h = clamp((altitude - uInnerRadius) / thickness, 0.0, 1.0);
+
+    // Density: exponential falloff with a gentler scale height so
+    // free-space rays (tangent to the limb) still accumulate meaningfully.
+    float density = exp(-h * 3.8);
+
+    // Direction from Earth centre at this sample
+    vec3 sampleDir = samplePos / altitude;
+    float sunAngle = dot(sampleDir, sunDir);
+
+    // ── Colour ramp ─────────────────────────────────────────────────────
+    vec3 dayColor      = vec3(0.25, 0.55, 1.00);
+    vec3 twilightColor = vec3(0.80, 0.30, 0.06);
+    vec3 nightColor    = vec3(0.03, 0.04, 0.14);
+
+    vec3 color;
+    if (sunAngle > 0.15) {
+      color = dayColor;
+    } else if (sunAngle > -0.15) {
+      float tw = (sunAngle + 0.15) / 0.30;
+      color = mix(twilightColor, dayColor, tw);
+    } else {
+      float tw = smoothstep(-0.5, -0.15, sunAngle);
+      color = mix(nightColor, twilightColor, tw);
+    }
+
+    // Sunward brightness modulation
+    float dayFactor = smoothstep(-0.40, 0.10, sunAngle);
+    float localWeight = density * mix(0.06, 0.55, dayFactor);
+
+    weightedColor += color * localWeight;
+    totalDensity  += density;
   }
 
-  // Sunward limb is much brighter; night limb is nearly invisible
-  float dayFactor    = smoothstep(-0.50, 0.00, sunAngle);
-  float rimStrength  = mix(0.10, 0.72, dayFactor);
+  // ── Beer-Lambert → nonlinear brightness ───────────────────────────────
+  // τ = totalDensity * stepSize gives raw optical depth along the ray.
+  // Beer-Lambert opacity: 1 - exp(-τ * σ).
+  // This is the key nonlinear curve: short paths → near-zero brightness,
+  // long grazing paths → saturating glow.  No linear blowout.
+  float tau = totalDensity * stepSize;
+  float scatter = 1.0 - exp(-tau * uStrength);
 
-  gl_FragColor = vec4(atmColor, rim * rimStrength);
+  // Average colour along the ray, weighted by density
+  vec3 avgColor = (totalDensity > 0.001)
+    ? weightedColor / totalDensity
+    : vec3(0.0);
+
+  // Final luminance = colour * scatter intensity.
+  // With additive blending, this RGB is added directly to the framebuffer.
+  vec3 luminance = avgColor * scatter;
+
+  // For rays that hit the ground, fade based on grazing angle so we
+  // don't wash out the surface (which has its own limb haze).
+  if (hitsGround) {
+    vec3 hitPos = rayOrigin + rayDir * innerHit.x;
+    vec3 hitNormal = normalize(hitPos);
+    float viewDot = abs(dot(hitNormal, rayDir));
+    // pow 3.0: gentle enough to still show atmosphere near the limb,
+    // aggressive enough to vanish over the surface centre.
+    float limbFade = pow(1.0 - viewDot, 3.0);
+    luminance *= limbFade;
+  }
+
+  // Alpha is meaningless for additive blending but set to scatter
+  // so that if blending mode ever changes things still work.
+  gl_FragColor = vec4(luminance, scatter);
 }
 `;
 
@@ -212,11 +315,12 @@ export class EarthRenderer {
 
   /** Written by Engine every frame via .copy(); update() propagates to uniforms. */
   readonly sunDirection: THREE.Vector3 = new THREE.Vector3(1, 0, 0);
+  private readonly atmosphereCameraPos: THREE.Vector3 = new THREE.Vector3();
 
   private readonly cloudMesh: THREE.Mesh;
   private readonly earthMat: THREE.ShaderMaterial;
   private readonly cloudMat: THREE.ShaderMaterial;
-  private readonly atmMat: THREE.ShaderMaterial;
+  private readonly atmosphereMat: THREE.ShaderMaterial;
 
   constructor(
     maxAnisotropy: number,
@@ -241,14 +345,15 @@ export class EarthRenderer {
     };
 
     const initCamPos = camera.position.clone();
+    this.atmosphereCameraPos.copy(initCamPos);
 
     // ── Earth surface ───────────────────────────────────────────────────────
     this.earthMat = new THREE.ShaderMaterial({
       uniforms: {
         uDayMap: { value: makePixel(80, 120, 180) },
         uNightMap: { value: makePixel(0, 0, 0) },
-        uNormalMap: { value: makePixel(128, 128, 255) }, // flat normal
-        uSpecularMap: { value: makePixel(0, 0, 0) },       // no specular until loaded
+        uNormalMap: { value: makePixel(128, 128, 255) },
+        uSpecularMap: { value: makePixel(0, 0, 0) },
         uSunDirection: { value: this.sunDirection.clone() },
         uCameraPos: { value: initCamPos.clone() },
       },
@@ -287,27 +392,35 @@ export class EarthRenderer {
     this.cloudMesh = new THREE.Mesh(cloudGeo, this.cloudMat);
     this.object.add(this.cloudMesh);
 
-    // ── Atmosphere shell — BackSide, additive blending ──────────────────────
-    this.atmMat = new THREE.ShaderMaterial({
+    // ── Atmosphere — single raymarched shell ────────────────────────────────
+    // Oversized sphere ensures the camera is always outside or the front faces
+    // always cover the planet silhouette. The fragment shader does all the
+    // real geometry via ray-sphere intersections against uInnerRadius/uOuterRadius.
+    const ATM_GEOM_RADIUS = 1.25; // larger than uOuterRadius so it frames the planet
+    this.atmosphereMat = new THREE.ShaderMaterial({
       uniforms: {
-        uSunDirection: { value: this.sunDirection.clone() },
-        uCameraPos: { value: initCamPos.clone() },
+        uSunDirection: { value: this.sunDirection },
+        uCameraPos: { value: this.atmosphereCameraPos },
+        uInnerRadius: { value: ATM_INNER_RADIUS },
+        uOuterRadius: { value: ATM_OUTER_RADIUS },
+        uStrength: { value: 3.2 },
       },
       vertexShader: ATM_VERT,
       fragmentShader: ATM_FRAG,
-      side: THREE.BackSide,
+      side: THREE.BackSide,  // camera is outside — back faces cover the planet disk
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      toneMapped: false,
     });
 
-    const atmGeo = new THREE.SphereGeometry(1.025, 64, 32);
-    this.object.add(new THREE.Mesh(atmGeo, this.atmMat));
+    const atmGeo = new THREE.SphereGeometry(ATM_GEOM_RADIUS, 64, 32);
+    this.object.add(new THREE.Mesh(atmGeo, this.atmosphereMat));
   }
 
   /**
    * Called every frame.
-   * Pushes uCameraPos to all shaderss that need it, and propagates the
+   * Pushes uCameraPos to all shaders that need it, and propagates the
    * sunDirection (already written by Engine) to all shader uniforms.
    * Also slowly rotates the cloud mesh.
    */
@@ -319,8 +432,7 @@ export class EarthRenderer {
 
     this.cloudMat.uniforms.uSunDirection.value.copy(this.sunDirection);
 
-    this.atmMat.uniforms.uSunDirection.value.copy(this.sunDirection);
-    this.atmMat.uniforms.uCameraPos.value.copy(camPos);
+    this.atmosphereCameraPos.copy(camPos);
 
     this.cloudMesh.rotation.y += 0.0001 * delta;
   }
