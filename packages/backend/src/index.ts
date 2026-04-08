@@ -7,6 +7,7 @@ import compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import tleRouter from './routes/tle.js';
+import dsoRouter from './routes/dso.js';
 import { isCacheFresh, readVersion } from './cache/file-cache.js';
 import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { logger } from './utils/logger.js';
@@ -47,6 +48,7 @@ app.use(express.json());
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 app.use('/api/tle', tleRouter);
+app.use('/api/dso', dsoRouter);
 
 // GET /health — used by load balancers and uptime monitors
 app.get('/health', (_req, res) => {

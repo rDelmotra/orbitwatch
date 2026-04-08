@@ -7,7 +7,10 @@ const CATEGORY_LABELS: Record<ObjectCategory, string> = {
   rocket_body: 'Rocket Body',
   debris: 'Debris',
   unknown: 'Unknown',
+  deep_space: 'Deep Space',
 };
+
+const EARTH_RADIUS_KM = 6371;
 
 const panelStyle: React.CSSProperties = {
   position: 'absolute',
@@ -69,12 +72,82 @@ export function InfoCard() {
   const selectedAltitude = useStore((s) => s.selectedAltitude);
   const selectedIndex = useStore((s) => s.selectedIndex);
   const setSelectedSatellite = useStore((s) => s.setSelectedSatellite);
+  const selectedDSO = useStore((s) => s.selectedDSO);
+  const selectedDSOIndex = useStore((s) => s.selectedDSOIndex);
+  const selectedDSOAltitude = useStore((s) => s.selectedDSOAltitude);
+  const setSelectedDSO = useStore((s) => s.setSelectedDSO);
+  const triggerFlyToDSO = useStore((s) => s.triggerFlyToDSO);
   const showOrbitTrail = useStore((s) => s.showOrbitTrail);
   const setShowOrbitTrail = useStore((s) => s.setShowOrbitTrail);
   const triggerFlyTo = useStore((s) => s.triggerFlyTo);
   const cameraMode = useStore((s) => s.cameraMode);
   const setCameraMode = useStore((s) => s.setCameraMode);
 
+  // ── DSO panel ──────────────────────────────────────────────────────────────
+  if (selectedDSO) {
+    const distKm = selectedDSOAltitude !== null
+      ? selectedDSOAltitude + EARTH_RADIUS_KM
+      : null;
+
+    return (
+      <div style={panelStyle}>
+        <div style={headerStyle}>
+          <div>
+            <div style={{ fontSize: '13px', fontWeight: 600, color: '#E040FB', marginBottom: 2 }}>
+              {selectedDSO.name}
+            </div>
+            <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>
+              Deep Space · {selectedDSO.regime}
+            </div>
+          </div>
+          <button style={closeStyle} onClick={() => setSelectedDSO(null, null)} title="Close">×</button>
+        </div>
+
+        {selectedDSO.mission && <Row label="Mission" value={selectedDSO.mission} />}
+        {selectedDSO.targetBody && <Row label="Target" value={selectedDSO.targetBody} />}
+        <Row label="Distance" value={distKm !== null ? `${Math.round(distKm).toLocaleString()} km` : null} />
+
+        <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+          <button
+            onClick={() => {
+              if (cameraMode === 'flying' || cameraMode === 'following') {
+                setCameraMode('returning');
+              } else if (cameraMode === 'returning') {
+                setCameraMode('free');
+              } else {
+                triggerFlyToDSO?.(selectedDSOIndex!);
+              }
+            }}
+            style={{
+              flex: 1, padding: '6px 0',
+              background: cameraMode !== 'free' ? 'rgba(224,64,251,0.2)' : 'rgba(255,255,255,0.06)',
+              border: `1px solid ${cameraMode !== 'free' ? 'rgba(224,64,251,0.5)' : 'rgba(255,255,255,0.12)'}`,
+              borderRadius: 4,
+              color: cameraMode !== 'free' ? '#E040FB' : 'rgba(255,255,255,0.7)',
+              fontFamily: 'monospace', fontSize: '11px', cursor: 'pointer',
+            }}
+          >
+            {cameraMode === 'following' ? 'Unfollow' : cameraMode === 'flying' ? 'Cancel' : cameraMode === 'returning' ? 'Stop' : 'Go to'}
+          </button>
+          <button
+            onClick={() => setShowOrbitTrail(!showOrbitTrail)}
+            style={{
+              flex: 1, padding: '6px 0',
+              background: showOrbitTrail ? 'rgba(224,64,251,0.15)' : 'rgba(255,255,255,0.06)',
+              border: `1px solid ${showOrbitTrail ? 'rgba(224,64,251,0.4)' : 'rgba(255,255,255,0.12)'}`,
+              borderRadius: 4,
+              color: showOrbitTrail ? '#E040FB' : 'rgba(255,255,255,0.7)',
+              fontFamily: 'monospace', fontSize: '11px', cursor: 'pointer',
+            }}
+          >
+            {showOrbitTrail ? 'Hide trail' : 'Show trail'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── TLE satellite panel ────────────────────────────────────────────────────
   if (!selectedSatellite) return null;
 
   const s = selectedSatellite;

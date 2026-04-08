@@ -117,9 +117,10 @@ export type ObjectCategory =
   | 'inactive_satellite'
   | 'rocket_body'
   | 'debris'
-  | 'unknown';
+  | 'unknown'
+  | 'deep_space';
 
-export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER';
+export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER' | 'LUNAR';
 
 // Fully enriched object — this is what gets cached and served to clients
 export interface EnrichedTLEObject {
@@ -138,6 +139,34 @@ export interface EnrichedTLEObject {
   inclination: number;           // degrees
   rcsSize: string | null;
   epoch: string;                 // ISO timestamp of the TLE epoch
+}
+
+// ── Deep-space / JPL Horizons types ──────────────────────────────────────────
+
+export interface DeepSpaceCatalogEntry {
+  horizonsId: string;       // e.g. '-1024'
+  noradId: number | null;   // for TLE dedup; null if no TLE exists
+  name: string;
+  category: 'deep_space';
+  regime: 'LUNAR';
+  mission?: string;
+  targetBody?: string;
+  missionStart?: string;    // ISO-8601, fetch window start for Horizons
+  missionEnd?: string;      // ISO-8601, fetch window end (if set and past, mission is complete → cache forever)
+}
+
+export interface HorizonsEphemerisPoint {
+  epoch: number;            // Unix ms
+  x: number; y: number; z: number;   // km, TEME Earth-centered
+  vx: number; vy: number; vz: number; // km/s
+}
+
+export interface HorizonsEphemerisResponse {
+  commandId: string;
+  windowStart: number;      // Unix ms
+  windowEnd: number;        // Unix ms
+  step: number;             // ms (600_000 for 10-min)
+  points: HorizonsEphemerisPoint[];
 }
 
 // Written to data/version.json

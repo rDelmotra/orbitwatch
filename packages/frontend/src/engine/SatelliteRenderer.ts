@@ -194,10 +194,10 @@ export class SatelliteRenderer {
     prevSizeArr.set(currSizeArr);
 
     const catCounts: Record<ObjectCategory, number> = {
-      active_satellite: 0, inactive_satellite: 0, rocket_body: 0, debris: 0, unknown: 0,
+      active_satellite: 0, inactive_satellite: 0, rocket_body: 0, debris: 0, unknown: 0, deep_space: 0,
     };
     const regCounts: Record<OrbitalRegime, number> = {
-      LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,
+      LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0, LUNAR: 0,
     };
 
     const obsInDark = observerPos ? isObserverInDark(observerPos, sunDir) : false;

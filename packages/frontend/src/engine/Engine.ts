@@ -2,11 +2,12 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EarthRenderer } from './EarthRenderer';
 import { StarfieldRenderer } from './StarfieldRenderer';
+import { DeepSpaceRenderer } from './DeepSpaceRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import { fetchVisualNoradIds } from '../data/visualList';
 import { SatelliteRenderer } from './SatelliteRenderer';
-import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
+import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime, DeepSpaceObject, HorizonsEphemerisPoint, DSOApiResponse } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
@@ -33,6 +34,10 @@ export class Engine {
   private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
+  private dsoData: DeepSpaceObject[] = [];
+  private dsoEphemeris: Record<string, HorizonsEphemerisPoint[]> = {};
+  private deepSpaceRenderer: DeepSpaceRenderer;
+  private followingDSO = false;
   private pointerDownPos: { x: number; y: number } | null = null;
   private lastHoverTime = 0;
   private static readonly HOVER_THROTTLE_MS = 100;
@@ -92,6 +97,9 @@ export class Engine {
     // ── Orbit trail ─────────────────────────────────────────────────────────
     this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
 
+    // ── Deep-space renderer ───────────────────────────────────────────────
+    this.deepSpaceRenderer = new DeepSpaceRenderer(this.scene);
+
     // ── Camera controller ────────────────────────────────────────────────────
     this.cameraController = new CameraController(this.camera);
 
@@ -109,6 +117,7 @@ export class Engine {
         this.cameraController.cancel();
         this.controls.enabled = true;
         this.arrivalTime = -1;
+        this.followingDSO = false;
 
         // Context-aware controls.target on transition to free
         if (this.dragExitedFollowing) {
@@ -177,12 +186,28 @@ export class Engine {
     try {
       store.setLoadingPhase('fetching');
       const apiUrl = import.meta.env.VITE_API_URL ?? '';
-      const [res, visualIds] = await Promise.all([
+      const [res, dsoRes, visualIds] = await Promise.all([
         fetch(`${apiUrl}/api/tle/all`),
+        fetch(`${apiUrl}/api/dso/all`),
         fetchVisualNoradIds(),
       ]);
       this.visualNoradIds = visualIds;
       if (!res.ok) throw new Error(`TLE fetch failed: ${res.status}`);
+
+      // DSO data is non-fatal: log a warning but continue if unavailable.
+      if (dsoRes.ok) {
+        const dsoResponse: DSOApiResponse = await dsoRes.json();
+        this.dsoData = dsoResponse.objects;
+        this.dsoEphemeris = dsoResponse.ephemeris;
+        console.log(`Loaded ${this.dsoData.length} DSO(s), ephemeris for: [${Object.keys(this.dsoEphemeris).join(', ')}]`);
+
+        this.deepSpaceRenderer.initFromCatalog(this.dsoData);
+        useStore.getState().setDSOData(this.dsoData);
+        useStore.getState().setSelectDSOByIndex((i) => this.selectDSOByIndex(i));
+        useStore.getState().setTriggerFlyToDSO((i) => this.flyToDSO(i));
+      } else {
+        console.warn(`DSO fetch failed (${dsoRes.status}) — deep-space objects unavailable`);
+      }
 
       const response = await res.json();
       const catalogData: EnrichedTLEObject[] = response.data;
@@ -199,9 +224,10 @@ export class Engine {
         rocket_body: 0,
         debris: 0,
         unknown: 0,
+        deep_space: 0,
       };
       const regimeCounts: Record<OrbitalRegime, number> = {
-        LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,
+        LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0, LUNAR: 0,
       };
       for (const obj of catalogData) {
         categoryCounts[obj.category] = (categoryCounts[obj.category] ?? 0) + 1;
@@ -310,10 +336,19 @@ export class Engine {
         if (state.showOrbitTrail !== prevShowTrail) {
           prevShowTrail = state.showOrbitTrail;
           if (state.showOrbitTrail) {
-            const idx = state.selectedIndex;
-            if (idx !== null && idx >= 0 && idx < this.catalogData.length) {
-              const sat = this.catalogData[idx];
-              this.orbitTrailRenderer.generate(sat.line1, sat.line2);
+            if (state.selectedDSOIndex !== null) {
+              // DSO trail: use ephemeris points directly
+              const dso = this.dsoData[state.selectedDSOIndex];
+              if (dso) {
+                const pts = this.dsoEphemeris[dso.horizonsId] ?? [];
+                this.orbitTrailRenderer.generateFromEphemeris(pts);
+              }
+            } else {
+              const idx = state.selectedIndex;
+              if (idx !== null && idx >= 0 && idx < this.catalogData.length) {
+                const sat = this.catalogData[idx];
+                this.orbitTrailRenderer.generate(sat.line1, sat.line2);
+              }
             }
           } else {
             this.orbitTrailRenderer.clear();
@@ -398,6 +433,7 @@ export class Engine {
   private loop = (): void => {
     this.animationId = requestAnimationFrame(this.loop);
     const delta = this.clock.getDelta();
+    const elapsed = this.clock.getElapsedTime();
     const now = new Date();
 
     // Sun direction in ECI frame — no rotation needed since the scene is inertial.
@@ -414,6 +450,9 @@ export class Engine {
       this.satelliteRenderer.material.uniforms.uT.value = uT;
     }
 
+    // ── Deep-space renderer update ────────────────────────────────────────
+    this.deepSpaceRenderer.update(Date.now(), this.dsoEphemeris, elapsed);
+
     this.devValidation?.tickFrame();
 
     // ── Camera mode handling ────────────────────────────────────────────────
@@ -427,21 +466,45 @@ export class Engine {
     if (cameraMode === 'free') {
       this.controls.update();
 
-    } else if (cameraMode === 'flying' && selectedIdx !== null) {
-      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      const radialDir = satPos.clone().normalize();
-      const endCamPos = satPos.clone().add(
-        radialDir.multiplyScalar(this.cameraController.followOffsetDist),
-      );
-      const done = this.cameraController.updateAnim(endCamPos, satPos, this.controls.target);
-      if (done) {
-        store.setCameraMode('following');
-        this.arrivalTime = performance.now();
+    } else if (cameraMode === 'flying') {
+      if (this.followingDSO) {
+        const dsoIdx = store.selectedDSOIndex;
+        if (dsoIdx !== null) {
+          const dsoPos = this.deepSpaceRenderer.getPosition(dsoIdx) ?? new THREE.Vector3();
+          const radialDir = dsoPos.clone().normalize();
+          const endCamPos = dsoPos.clone().add(
+            radialDir.multiplyScalar(this.cameraController.followOffsetDist),
+          );
+          const done = this.cameraController.updateAnim(endCamPos, dsoPos, this.controls.target);
+          if (done) {
+            store.setCameraMode('following');
+            this.arrivalTime = performance.now();
+          }
+        }
+      } else if (selectedIdx !== null) {
+        const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
+        const radialDir = satPos.clone().normalize();
+        const endCamPos = satPos.clone().add(
+          radialDir.multiplyScalar(this.cameraController.followOffsetDist),
+        );
+        const done = this.cameraController.updateAnim(endCamPos, satPos, this.controls.target);
+        if (done) {
+          store.setCameraMode('following');
+          this.arrivalTime = performance.now();
+        }
       }
 
-    } else if (cameraMode === 'following' && selectedIdx !== null) {
-      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      this.cameraController.updateFollow(satPos, this.controls.target);
+    } else if (cameraMode === 'following') {
+      if (this.followingDSO) {
+        const dsoIdx = store.selectedDSOIndex;
+        if (dsoIdx !== null) {
+          const dsoPos = this.deepSpaceRenderer.getPosition(dsoIdx) ?? new THREE.Vector3();
+          this.cameraController.updateFollow(dsoPos, this.controls.target);
+        }
+      } else if (selectedIdx !== null) {
+        const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
+        this.cameraController.updateFollow(satPos, this.controls.target);
+      }
 
     } else if (cameraMode === 'returning') {
       const done = this.cameraController.updateAnim(
@@ -512,6 +575,14 @@ export class Engine {
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
 
+    // Check DSO hover first (screen-space proximity — DSOs not in GPU picker)
+    const dsoHover = this.pickDSO(screenX, screenY, rect.width, rect.height);
+    if (dsoHover !== null) {
+      canvas.style.cursor = 'pointer';
+      useStore.getState().setHover(this.dsoData[dsoHover].name, e.clientX, e.clientY);
+      return;
+    }
+
     this.syncPickerUniforms();
     const index = this.gpuPicker.pickSingle(screenX, screenY, rect.width, rect.height);
 
@@ -541,6 +612,13 @@ export class Engine {
     const rect = canvas.getBoundingClientRect();
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
+
+    // DSO picking: screen-space proximity check (DSOs not in GPU picker)
+    const dsoIndex = this.pickDSO(screenX, screenY, rect.width, rect.height);
+    if (dsoIndex !== null) {
+      this.selectDSOByIndex(dsoIndex);
+      return;
+    }
 
     this.syncPickerUniforms();
     const gpuHits = this.gpuPicker.pickArea(screenX, screenY, rect.width, rect.height);
@@ -626,7 +704,71 @@ export class Engine {
       store.setCameraMode('free');
     }
 
+    this.deepSpaceRenderer.clearSelection();
+    this.followingDSO = false;
     store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
+  }
+
+  // ── Deep-space methods ──────────────────────────────────────────────────────
+
+  /**
+   * Screen-space proximity pick for DSOs (not in GPU picker — too few to warrant it).
+   * Returns the DSO index if the pointer is within 20px of a projected DSO position.
+   */
+  private pickDSO(screenX: number, screenY: number, canvasW: number, canvasH: number): number | null {
+    if (this.dsoData.length === 0) return null;
+    const RADIUS_SQ = 20 * 20;
+    for (let i = 0; i < this.dsoData.length; i++) {
+      const worldPos = this.deepSpaceRenderer.getPosition(i);
+      if (!worldPos) continue;
+      const projected = worldPos.clone().project(this.camera);
+      if (projected.z > 1) continue; // behind camera
+      const sx = (projected.x + 1) * 0.5 * canvasW;
+      const sy = (1 - projected.y) * 0.5 * canvasH;
+      const dx = screenX - sx;
+      const dy = screenY - sy;
+      if (dx * dx + dy * dy < RADIUS_SQ) return i;
+    }
+    return null;
+  }
+
+  selectDSOByIndex(index: number): void {
+    if (index < 0 || index >= this.dsoData.length) return;
+    const store = useStore.getState();
+
+    // Exit 'returning' if user picks a new DSO mid-return. Don't force 'free' from
+    // 'flying'/'following' — callers like flyToDSO set the correct mode immediately after.
+    if (store.cameraMode === 'returning') store.setCameraMode('free');
+
+    const dso = this.dsoData[index];
+    const worldPos = this.deepSpaceRenderer.getPosition(index);
+    const altitudeKm = worldPos
+      ? Math.round(worldPos.length() * EARTH_RADIUS_KM - EARTH_RADIUS_KM)
+      : null;
+
+    this.followingDSO = false;
+    this.deepSpaceRenderer.setSelectedIndex(index);
+    store.setSelectedDSO(index, dso, altitudeKm);
+  }
+
+  flyToDSO(index: number): void {
+    if (index < 0 || index >= this.dsoData.length) return;
+    const store = useStore.getState();
+
+    // Already flying/following this DSO — no-op
+    if (this.followingDSO
+      && (store.cameraMode === 'flying' || store.cameraMode === 'following')
+      && store.selectedDSOIndex === index) return;
+
+    if (store.selectedDSOIndex !== index) this.selectDSOByIndex(index);
+
+    const dsoPos = this.deepSpaceRenderer.getPosition(index);
+    if (!dsoPos) return;
+
+    this.followingDSO = true;
+    this.arrivalTime = -1;
+    this.cameraController.flyTo(dsoPos, this.controls.target);
+    store.setCameraMode('flying');
   }
 
   flyToSatellite(index: number): void {
@@ -728,6 +870,7 @@ export class Engine {
       this.observerMarker = null;
     }
     this.gpuPicker?.dispose();
+    this.deepSpaceRenderer.dispose();
     this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import * as satellite from 'satellite.js';
+import type { HorizonsEphemerisPoint } from '../data/types';
+import { sampleEphemerisTrail } from '../orbital/hermite';
 
 const EARTH_RADIUS_KM = 6371;
 const TRAIL_POINTS = 360;
@@ -36,7 +38,7 @@ const TRAIL_FRAG = `
 
 export class OrbitTrailRenderer {
   private scene: THREE.Scene;
-  private line: THREE.LineLoop | null = null;
+  private line: THREE.Line | null = null;
   private glow: THREE.Points | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private lineMaterial: THREE.LineBasicMaterial | null = null;
@@ -102,6 +104,59 @@ export class OrbitTrailRenderer {
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+    });
+    this.glow = new THREE.Points(this.geometry, this.glowMaterial);
+    this.glow.frustumCulled = false;
+
+    this.scene.add(this.line);
+    this.scene.add(this.glow);
+  }
+
+  /**
+   * Build a trail directly from JPL Horizons ephemeris points.
+   * Uses an open THREE.Line (not LineLoop) since DSO trajectories are non-closed.
+   * The color is deep-space purple (#E040FB) to distinguish from TLE orbit trails.
+   */
+  generateFromEphemeris(points: HorizonsEphemerisPoint[]): void {
+    this.clear();
+    if (points.length < 2) return;
+
+    // Hermite-interpolate 360 evenly-spaced points from the raw 10-min samples.
+    // This gives a physically accurate smooth curve — same maths as the live dot.
+    // Directly using raw samples would produce visible straight-line kinks every 10 min.
+    const sampled = sampleEphemerisTrail(points, 360);
+    if (sampled.length < 2) return;
+
+    const posArray = new Float32Array(sampled.length * 3);
+    for (let i = 0; i < sampled.length; i++) {
+      // sampleEphemerisTrail already applies TEME→scene axis swap + km→ER conversion
+      posArray[i * 3]     = sampled[i].x;
+      posArray[i * 3 + 1] = sampled[i].y;
+      posArray[i * 3 + 2] = sampled[i].z;
+    }
+
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+
+    this.lineMaterial = new THREE.LineBasicMaterial({
+      color: 0xE040FB,
+      transparent: true,
+      opacity: 0.55,
+    });
+    this.line = new THREE.Line(this.geometry, this.lineMaterial);
+    this.line.frustumCulled = false;
+
+    this.glowMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor:      { value: new THREE.Color(0xE040FB) },
+        uPixelRatio: { value: window.devicePixelRatio },
+        uPointSize:  { value: 4.0 },
+      },
+      vertexShader:   TRAIL_VERT,
+      fragmentShader: TRAIL_FRAG,
+      transparent:    true,
+      blending:       THREE.AdditiveBlending,
+      depthWrite:     false,
     });
     this.glow = new THREE.Points(this.geometry, this.glowMaterial);
     this.glow.frustumCulled = false;

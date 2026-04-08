@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
+import type { EnrichedTLEObject, DeepSpaceObject, ObjectCategory, OrbitalRegime } from '../data/types';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
@@ -23,6 +23,14 @@ interface AppState {
   selectedSatellite: EnrichedTLEObject | null;
   selectedAltitude: number | null;
   showOrbitTrail: boolean;
+
+  // Deep-space object selection (separate from TLE selection)
+  dsoData: DeepSpaceObject[];
+  selectedDSOIndex: number | null;
+  selectedDSO: DeepSpaceObject | null;
+  selectedDSOAltitude: number | null;
+  selectDSOByIndex: ((index: number) => void) | null;
+  triggerFlyToDSO: ((index: number) => void) | null;
 
   hoveredName: string | null;
   hoverScreenX: number;
@@ -71,6 +79,10 @@ interface AppState {
   clearCluster: () => void;
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
+  setDSOData: (data: DeepSpaceObject[]) => void;
+  setSelectDSOByIndex: (fn: (index: number) => void) => void;
+  setSelectedDSO: (index: number | null, data: DeepSpaceObject | null, altitude?: number | null) => void;
+  setTriggerFlyToDSO: (fn: (index: number) => void) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -84,6 +96,7 @@ export const useStore = create<AppState>((set) => ({
     rocket_body: 0,
     debris: 0,
     unknown: 0,
+    deep_space: 0,
   },
   dataVersion: null,
   dataTimestamp: null,
@@ -97,6 +110,13 @@ export const useStore = create<AppState>((set) => ({
   selectedSatellite: null,
   selectedAltitude: null,
   showOrbitTrail: false,
+
+  dsoData: [],
+  selectedDSOIndex: null,
+  selectedDSO: null,
+  selectedDSOAltitude: null,
+  selectDSOByIndex: null,
+  triggerFlyToDSO: null,
 
   hoveredName: null,
   hoverScreenX: 0,
@@ -115,17 +135,19 @@ export const useStore = create<AppState>((set) => ({
     rocket_body: true,
     debris: true,
     unknown: true,
+    deep_space: true,
   },
-  regimeFilters: { LEO: true, MEO: true, GEO: true, HEO: true, OTHER: true },
-  regimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
+  regimeFilters: { LEO: true, MEO: true, GEO: true, HEO: true, OTHER: true, LUNAR: true },
+  regimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0, LUNAR: 0 },
   visibleCategoryCounts: {
     active_satellite: 0,
     inactive_satellite: 0,
     rocket_body: 0,
     debris: 0,
     unknown: 0,
+    deep_space: 0,
   },
-  visibleRegimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
+  visibleRegimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0, LUNAR: 0 },
 
   setCameraMode: (mode) => set({ cameraMode: mode }),
   setTriggerFlyTo: (fn) => set({ triggerFlyTo: fn }),
@@ -166,6 +188,8 @@ export const useStore = create<AppState>((set) => ({
       selectedSatellite: data,
       selectedAltitude: altitude ?? null,
       showOrbitTrail: false,
+      // Clear DSO selection when selecting a TLE satellite
+      ...(index !== null ? { selectedDSOIndex: null, selectedDSO: null, selectedDSOAltitude: null } : {}),
       // Deselecting during tracking: smooth return to Earth-centered view
       ...(index === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')
         ? { cameraMode: 'returning' as CameraMode }
@@ -187,4 +211,20 @@ export const useStore = create<AppState>((set) => ({
   clearCluster: () => set({ clusterItems: [] }),
   setObserverLocation: (loc) => set({ observerLocation: loc }),
   setVisibilityMode: (mode) => set({ visibilityMode: mode }),
+  setDSOData: (data) => set({ dsoData: data }),
+  setSelectDSOByIndex: (fn) => set({ selectDSOByIndex: fn }),
+  setSelectedDSO: (index, data, altitude) =>
+    set((state) => ({
+      selectedDSOIndex: index,
+      selectedDSO: data,
+      selectedDSOAltitude: altitude ?? null,
+      showOrbitTrail: false,
+      // Clear TLE selection when selecting a DSO
+      ...(index !== null ? { selectedIndex: null, selectedSatellite: null, selectedAltitude: null } : {}),
+      // Deselecting DSO during tracking: smooth return
+      ...(index === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')
+        ? { cameraMode: 'returning' as CameraMode }
+        : {}),
+    })),
+  setTriggerFlyToDSO: (fn) => set({ triggerFlyToDSO: fn }),
 }));

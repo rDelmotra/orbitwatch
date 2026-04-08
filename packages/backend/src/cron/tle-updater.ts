@@ -11,6 +11,9 @@ import {
   ClassifiableObject,
 } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { deepSpaceNoradIds, getDeepSpaceCatalog } from '../services/deep-space-catalog.js';
+import { fetchHorizonsVectors } from '../services/horizons.js';
+import { isHorizonsCacheFresh, readHorizonsCache, writeHorizonsCache } from '../cache/horizons-cache.js';
 
 // Cron schedule: "0 2 * * *" = 02:00 UTC every day.
 // Chosen to avoid peak hours and stay well away from adjacent cron runs.
@@ -46,6 +49,9 @@ function buildFromSpaceTrack(
   for (const gp of gpElements) {
     // Skip objects without TLE lines — they can't be propagated.
     if (!gp.TLE_LINE1 || !gp.TLE_LINE2) continue;
+
+    // Exclude deep-space NORAD IDs — SGP4 produces garbage for lunar trajectories.
+    if (deepSpaceNoradIds.has(parseInt(gp.NORAD_CAT_ID, 10))) continue;
 
     // Space-Track returns numeric fields as strings — parse explicitly.
     const period      = parseFloat(gp.PERIOD);
@@ -109,6 +115,9 @@ function buildFromCelesTrak(gpElements: CelesTrakGPElement[]): EnrichedTLEObject
 
   for (const gp of gpElements) {
     if (!gp.TLE_LINE1 || !gp.TLE_LINE2) continue;
+
+    // Exclude deep-space NORAD IDs — SGP4 produces garbage for lunar trajectories.
+    if (deepSpaceNoradIds.has(gp.NORAD_CAT_ID)) continue;
 
     const classifiable: ClassifiableObject = {
       period:      gp.PERIOD,
@@ -216,6 +225,91 @@ export async function runUpdateCycle(): Promise<void> {
 }
 
 /**
+ * Fetch and cache ephemeris from JPL Horizons for all deep-space catalog entries.
+ *
+ * Strategy:
+ *   - If missionStart/missionEnd are set, fetch the full mission arc at 30-min
+ *     steps (gives ~480 points for a 10-day mission — ~40 KB JSON).
+ *   - Completed missions (missionEnd in the past AND cache exists) are skipped
+ *     entirely — the trajectory won't change.
+ *   - Active missions (missionEnd in future or absent) extend the window to
+ *     now+48h and are refreshed daily.
+ *   - Fallback (no mission dates): now−24h → now+48h at 10-min steps.
+ *
+ * Sequential with a 1s pause between requests to be polite to the JPL API.
+ */
+export async function runHorizonsUpdateCycle(): Promise<void> {
+  const objects = getDeepSpaceCatalog();
+  if (objects.length === 0) return;
+
+  logger.info(`Horizons update: checking ${objects.length} deep-space object(s)`);
+  const now = new Date();
+
+  for (const [i, obj] of objects.entries()) {
+    // Completed missions with existing cache: trajectory is immutable, skip.
+    const missionEndMs = obj.missionEnd ? new Date(obj.missionEnd).getTime() : null;
+    const isComplete = missionEndMs !== null && missionEndMs < now.getTime();
+    if (isComplete && readHorizonsCache(obj.horizonsId)) {
+      logger.info(`Horizons: ${obj.name} mission complete + cached — skipping`);
+      continue;
+    }
+
+    // Active/ongoing: respect 24h TTL to avoid hammering JPL.
+    if (isHorizonsCacheFresh(obj.horizonsId)) {
+      logger.info(`Horizons cache fresh — skipping ${obj.name} (${obj.horizonsId})`);
+      continue;
+    }
+
+    // Determine fetch window.
+    // For missions with missionStart: fetch full arc from mission start.
+    // For active missions (no missionEnd): clamp end to `now` since Horizons
+    // only has data up to current tracking uploads. Adding a buffer beyond
+    // the last data point would cause Horizons to reject the request.
+    const windowStart = obj.missionStart
+      ? new Date(obj.missionStart)
+      : new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    let windowEnd: Date;
+    if (obj.missionEnd) {
+      // Completed mission: fetch the full arc
+      windowEnd = new Date(obj.missionEnd);
+    } else if (obj.missionStart) {
+      // Active mission: fetch from mission start to now (Horizons coverage grows daily)
+      windowEnd = now;
+    } else {
+      // No mission dates at all: rolling 72h window
+      windowEnd = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+    }
+
+    // Use 30-min steps for full-arc missions, 10-min for rolling windows.
+    const stepMinutes = obj.missionStart ? 30 : 10;
+
+    try {
+      logger.info(`Fetching Horizons ephemeris for ${obj.name} (${obj.horizonsId}), window: ${windowStart.toISOString()} → ${windowEnd.toISOString()}, step: ${stepMinutes}m`);
+      const points = await fetchHorizonsVectors(obj.horizonsId, windowStart, windowEnd, stepMinutes);
+
+      writeHorizonsCache(obj.horizonsId, {
+        commandId:   obj.horizonsId,
+        windowStart: windowStart.getTime(),
+        windowEnd:   windowEnd.getTime(),
+        step:        stepMinutes * 60 * 1000,
+        points,
+      });
+
+      logger.info(`Horizons: cached ${points.length} points for ${obj.name}`);
+    } catch (err) {
+      logger.error(`Horizons fetch failed for ${obj.name} (${obj.horizonsId}):`, (err as Error).message);
+      // Non-fatal: stale cache (or no cache) will be served; the next cycle will retry.
+    }
+
+    // Polite delay between objects — skip after the last one.
+    if (i < objects.length - 1) {
+      await new Promise<void>((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
+/**
  * Schedule the daily cron job and optionally trigger an immediate fetch.
  *
  * @param runNow - Pass true when the cache is missing or stale at startup.
@@ -223,12 +317,16 @@ export async function runUpdateCycle(): Promise<void> {
 export function scheduleTLEUpdater(runNow: boolean): void {
   if (runNow) {
     logger.info('Cache missing or stale at startup — triggering immediate fetch');
-    runUpdateCycle().catch((err) => logger.error('Startup fetch error:', err));
+    // Run both independently: TLE fetch guards its own freshness, Horizons guards its own.
+    runUpdateCycle().catch((err) => logger.error('Startup TLE fetch error:', err));
+    runHorizonsUpdateCycle().catch((err) => logger.error('Startup Horizons fetch error:', err));
   }
 
   const job = cron.schedule(CRON_SCHEDULE, () => {
     logger.info(`Cron triggered (${CRON_SCHEDULE})`);
-    runUpdateCycle().catch((err) => logger.error('Cron cycle error:', err));
+    // Both run every cron tick; each checks its own TTL internally and skips if fresh.
+    runUpdateCycle().catch((err) => logger.error('Cron TLE cycle error:', err));
+    runHorizonsUpdateCycle().catch((err) => logger.error('Cron Horizons cycle error:', err));
   });
 
   logger.info(`TLE updater scheduled: ${CRON_SCHEDULE} (daily at 02:00 UTC)`);

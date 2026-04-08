@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import Fuse, { type FuseResult } from 'fuse.js';
 import { useStore } from '../store/useStore';
-import type { EnrichedTLEObject, ObjectCategory } from '../data/types';
+import type { EnrichedTLEObject, DeepSpaceObject, ObjectCategory } from '../data/types';
 
 const CATEGORY_COLORS: Record<ObjectCategory, string> = {
   active_satellite: '#4CAF50',
@@ -9,17 +9,33 @@ const CATEGORY_COLORS: Record<ObjectCategory, string> = {
   rocket_body: '#FFC107',
   debris: '#F44336',
   unknown: '#757575',
+  deep_space: '#E040FB',
 };
 
 const DEBOUNCE_MS = 150;
 
+// A DSO result carries a flag so we know to call selectDSOByIndex instead
+interface DSOResult {
+  isDSO: true;
+  dsoIndex: number;
+  item: DeepSpaceObject;
+}
+
+type SearchResult = FuseResult<EnrichedTLEObject> | DSOResult;
+
+function isDSOResult(r: SearchResult): r is DSOResult {
+  return (r as DSOResult).isDSO === true;
+}
+
 export function SearchBar() {
   const catalogData = useStore((s) => s.catalogData);
   const selectByIndex = useStore((s) => s.selectByIndex);
+  const dsoData = useStore((s) => s.dsoData);
+  const selectDSOByIndex = useStore((s) => s.selectDSOByIndex);
   const loadingPhase = useStore((s) => s.loadingPhase);
 
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<FuseResult<EnrichedTLEObject>[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -55,24 +71,37 @@ export function SearchBar() {
         return;
       }
       debounceRef.current = setTimeout(() => {
-        const hits = fuse.search(value, { limit: 10 });
-        setResults(hits);
+        // DSO name match (simple — there are <10)
+        const lc = value.toLowerCase();
+        const dsoHits: DSOResult[] = dsoData
+          .map((dso, i) => ({ isDSO: true as const, dsoIndex: i, item: dso }))
+          .filter(({ item }) =>
+            item.name.toLowerCase().includes(lc) ||
+            (item.mission ?? '').toLowerCase().includes(lc)
+          );
+
+        const tleHits = fuse.search(value, { limit: 10 - dsoHits.length });
+        setResults([...dsoHits, ...tleHits]);
         setHighlightedIndex(0);
       }, DEBOUNCE_MS);
     },
-    [fuse],
+    [fuse, dsoData],
   );
 
   // Select a result
   const selectResult = useCallback(
-    (refIndex: number) => {
-      if (selectByIndex) selectByIndex(refIndex);
+    (result: SearchResult) => {
+      if (isDSOResult(result)) {
+        selectDSOByIndex?.(result.dsoIndex);
+      } else if (result.refIndex != null) {
+        selectByIndex?.(result.refIndex);
+      }
       setQuery('');
       setResults([]);
       setIsOpen(false);
       inputRef.current?.blur();
     },
-    [selectByIndex],
+    [selectByIndex, selectDSOByIndex],
   );
 
   // Keyboard navigation
@@ -87,7 +116,7 @@ export function SearchBar() {
       } else if (e.key === 'Enter' && results.length > 0) {
         e.preventDefault();
         const hit = results[highlightedIndex];
-        if (hit?.refIndex != null) selectResult(hit.refIndex);
+        if (hit) selectResult(hit);
       } else if (e.key === 'Escape') {
         setQuery('');
         setResults([]);
@@ -148,19 +177,27 @@ export function SearchBar() {
       {showDropdown && (
         <div style={dropdownStyle}>
           {results.map((hit, i) => {
-            const obj = hit.item;
+            const isDSO = isDSOResult(hit);
+            const name = isDSO ? hit.item.name : hit.item.name;
+            const dotColor = isDSO
+              ? CATEGORY_COLORS['deep_space']
+              : CATEGORY_COLORS[(hit.item as EnrichedTLEObject).category as ObjectCategory];
+            const key = isDSO ? `dso-${hit.dsoIndex}` : String((hit.item as EnrichedTLEObject).noradId);
+            const secondary = isDSO
+              ? (hit.item.mission ?? 'Deep Space')
+              : String((hit.item as EnrichedTLEObject).noradId);
+
             return (
               <div
-                key={obj.noradId}
+                key={key}
                 style={{
                   ...resultItemStyle,
-                  background:
-                    i === highlightedIndex ? 'rgba(255,255,255,0.08)' : 'transparent',
+                  background: i === highlightedIndex ? 'rgba(255,255,255,0.08)' : 'transparent',
                 }}
                 onMouseEnter={() => setHighlightedIndex(i)}
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  if (hit.refIndex != null) selectResult(hit.refIndex);
+                  selectResult(hit);
                 }}
               >
                 <span
@@ -169,16 +206,16 @@ export function SearchBar() {
                     width: 8,
                     height: 8,
                     borderRadius: '50%',
-                    background: CATEGORY_COLORS[obj.category as ObjectCategory],
+                    background: dotColor,
                     marginRight: 8,
                     flexShrink: 0,
                   }}
                 />
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {obj.name}
+                  {name}
                 </span>
                 <span style={{ color: 'rgba(255,255,255,0.35)', marginLeft: 8, flexShrink: 0 }}>
-                  {obj.noradId}
+                  {secondary}
                 </span>
               </div>
             );

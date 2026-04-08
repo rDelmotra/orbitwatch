@@ -7,6 +7,7 @@ const CATEGORY_DOT: Record<ObjectCategory, string> = {
   rocket_body: '#FFC107',
   debris: '#F44336',
   unknown: '#757575',
+  deep_space: '#E040FB',
 };
 
 const panelStyle: React.CSSProperties = {

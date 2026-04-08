@@ -35,7 +35,9 @@ export class CameraController {
   /** Start a fly-to-satellite animation (2 s). */
   flyTo(satPos: THREE.Vector3, currentTarget: THREE.Vector3): void {
     const altitude = satPos.length() - 1.0;
-    this.followOffsetDist = Math.min(Math.max(altitude * 0.3 + 0.05, 0.06), 2.0);
+    this.followOffsetDist = altitude > 10
+      ? Math.min(altitude * 0.05, 5.0)                           // DSO: gentle 5% offset, max 5 ER
+      : Math.min(Math.max(altitude * 0.3 + 0.05, 0.06), 2.0);   // LEO/GEO: unchanged
     this.anim = {
       startTime: performance.now(),
       duration: 2000,
