@@ -20,6 +20,8 @@ build/
 # 13MB Backend cache (Crucial)
 packages/backend/data/tle-cache.json
 packages/backend/data/version.json
+# Root level cache (mistakenly added before)
+data/
 # Root level temporary reference files
 PROGRESS.md
 viewing_frame.txt
