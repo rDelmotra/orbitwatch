@@ -15,3 +15,5 @@
  * - a later phase that adds canonical DSO normalization contracts and helpers
  */
 export * from './types.js';
+export * from './convert.js';
+export * from './validate.js';

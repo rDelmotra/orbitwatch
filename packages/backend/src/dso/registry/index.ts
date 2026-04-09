@@ -16,3 +16,4 @@
  * - a later phase that introduces the DSO registry contracts and entries
  */
 export * from './types.js';
+export * from './entries.js';

@@ -15,3 +15,4 @@
  * - a later phase that adds manifest, catalog, and snapshot publish helpers
  */
 export * from './types.js';
+export * from './store.js';

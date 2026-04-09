@@ -12,10 +12,11 @@
  * - imports from TLE-specific types or updater logic
  */
 
-import type { DsoProvider } from '../registry/index.js';
+import type { DsoProvider, DsoRegistryEntry } from '../registry/index.js';
 
 export interface ProviderSample {
-  timestamp: string;
+  julianDayTdb: number;
+  timestampIsoTdb: string;
   x: number;
   y: number;
   z: number;
@@ -29,7 +30,16 @@ export interface ProviderFetchResult {
   providerObjectId: string;
   sourceFrame: string;
   sourceUnits: string;
+  timeScale: 'TDB';
   fetchedAt: string;
   sourceRevisionAt: string | null;
   samples: ProviderSample[];
+}
+
+export interface DsoProviderAdapter {
+  fetchEphemeris(
+    entry: DsoRegistryEntry,
+    windowStart: Date,
+    windowEnd: Date,
+  ): Promise<ProviderFetchResult>;
 }

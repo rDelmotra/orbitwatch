@@ -16,3 +16,5 @@
  * - a later phase that adds Horizons and future provider adapters
  */
 export * from './types.js';
+export * from './horizons.js';
+export * from './factory.js';

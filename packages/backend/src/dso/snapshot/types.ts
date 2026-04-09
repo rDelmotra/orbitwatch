@@ -20,13 +20,14 @@ import type {
 import type { CanonicalStateVector } from '../normalize/index.js';
 
 export type DsoFreshnessState = 'fresh' | 'stale' | 'degraded' | 'unavailable';
+export type DsoSourceFrame = 'J2000' | (string & {});
 
 export interface DsoSnapshot {
   dsoId: DsoId;
   snapshotVersion: string;
   provider: DsoProvider;
   sourceObjectId: string;
-  sourceFrame: string;
+  sourceFrame: DsoSourceFrame;
   frame: 'TEME';
   distanceUnits: 'earth_radii';
   velocityUnits: 'earth_radii_per_second';
@@ -74,4 +75,10 @@ export interface DsoManifest {
   generatedAt: string;
   workerLastRunAt: string | null;
   objects: Record<DsoId, DsoObjectStatus>;
+}
+
+export interface DsoCatalog {
+  catalogVersion: string;
+  generatedAt: string;
+  objects: DsoCatalogEntry[];
 }
