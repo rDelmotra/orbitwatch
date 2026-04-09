@@ -34,6 +34,7 @@ import { logger } from '../../utils/logger.js';
 const FALLBACK_LOOP_INTERVAL_MS = 60_000;
 const LOOP_JITTER_RATIO = 0.1;
 const MIN_LOOP_INTERVAL_MS = 1_000;
+const UNAVAILABLE_RETRY_DELAY_MS = 60_000;
 
 export interface DsoWorkerLoopOptions {
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
@@ -101,7 +102,28 @@ export function shouldRefreshDsoEntry(
   return validToMs - nowMs <= refreshIntervalMs;
 }
 
-function computeLoopDelayMs(entries: readonly DsoRegistryEntry[]): number {
+function hasUnavailableFailedEntries(
+  entries: readonly DsoRegistryEntry[],
+  manifest: DsoManifest | null,
+): boolean {
+  if (!manifest) {
+    return false;
+  }
+
+  return entries.some((entry) => {
+    const status = manifest.objects[entry.dsoId];
+    return Boolean(status?.lastFailureAt && !status.currentSnapshotVersion);
+  });
+}
+
+function computeLoopDelayMs(
+  entries: readonly DsoRegistryEntry[],
+  manifest: DsoManifest | null,
+): number {
+  if (hasUnavailableFailedEntries(entries, manifest)) {
+    return UNAVAILABLE_RETRY_DELAY_MS;
+  }
+
   const shortestRefreshMs = entries.reduce<number>(
     (shortest, entry) => Math.min(shortest, entry.refreshIntervalSec * 1000),
     Number.POSITIVE_INFINITY,
@@ -186,6 +208,7 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
   const delaySleep = options.sleep ?? setTimeout;
   const abortController = new AbortController();
   let stopRequested = false;
+  let latestManifest: DsoManifest | null = null;
 
   const run = (async () => {
     const initialEntries = getEnabledDsoRegistryEntries();
@@ -195,7 +218,7 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
 
     while (!stopRequested) {
       try {
-        await reconcileDsoWorkerOnce();
+        latestManifest = await reconcileDsoWorkerOnce();
       } catch (error) {
         logger.error(`DSO worker iteration crashed: ${formatErrorMessage(error)}`);
         options.onIterationError?.(error);
@@ -206,7 +229,7 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
       }
 
       const activeEntries = getEnabledDsoRegistryEntries();
-      const delayMs = computeLoopDelayMs(activeEntries);
+      const delayMs = computeLoopDelayMs(activeEntries, latestManifest);
       logger.info(`DSO worker sleeping for ${delayMs}ms before next reconcile`);
 
       try {

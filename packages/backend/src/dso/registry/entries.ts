@@ -18,20 +18,26 @@ import type { DsoId, DsoRegistryEntry } from './types.js';
 const DEFAULT_SAMPLE_STEP_SEC = 600;
 const DEFAULT_REFRESH_INTERVAL_SEC = 21_600;
 const DEFAULT_VALID_PAST_WINDOW_SEC = 864_000; // 10 days
-const DEFAULT_VALID_FUTURE_WINDOW_SEC = 7200; // 3 days
+const DEFAULT_VALID_FUTURE_WINDOW_SEC = 7200; // 2 hours
 
 function createRegistryEntry(
   entry: Omit<
     DsoRegistryEntry,
     'sampleStepSec' | 'refreshIntervalSec' | 'validPastWindowSec' | 'validFutureWindowSec'
-  >,
+  > &
+    Partial<
+      Pick<
+        DsoRegistryEntry,
+        'sampleStepSec' | 'refreshIntervalSec' | 'validPastWindowSec' | 'validFutureWindowSec'
+      >
+    >,
 ): DsoRegistryEntry {
   return {
     ...entry,
-    sampleStepSec: DEFAULT_SAMPLE_STEP_SEC,
-    refreshIntervalSec: DEFAULT_REFRESH_INTERVAL_SEC,
-    validPastWindowSec: DEFAULT_VALID_PAST_WINDOW_SEC,
-    validFutureWindowSec: DEFAULT_VALID_FUTURE_WINDOW_SEC,
+    sampleStepSec: entry.sampleStepSec ?? DEFAULT_SAMPLE_STEP_SEC,
+    refreshIntervalSec: entry.refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC,
+    validPastWindowSec: entry.validPastWindowSec ?? DEFAULT_VALID_PAST_WINDOW_SEC,
+    validFutureWindowSec: entry.validFutureWindowSec ?? DEFAULT_VALID_FUTURE_WINDOW_SEC,
   };
 }
 
@@ -42,7 +48,7 @@ export const DSO_REGISTRY = [
     displayName: 'James Webb Space Telescope',
     provider: 'horizons',
     providerObjectId: '-170',
-    enabled: true,
+    enabled: false,
     targetBody: 'other',
     regime: 'OTHER',
     mission: 'JWST',
@@ -56,7 +62,7 @@ export const DSO_REGISTRY = [
     displayName: 'DSCOVR',
     provider: 'horizons',
     providerObjectId: '-78',
-    enabled: true,
+    enabled: false,
     targetBody: 'other',
     regime: 'OTHER',
     mission: 'DSCOVR',
@@ -70,7 +76,7 @@ export const DSO_REGISTRY = [
     displayName: 'Lunar Reconnaissance Orbiter',
     provider: 'horizons',
     providerObjectId: '-85',
-    enabled: true,
+    enabled: false,
     targetBody: 'moon',
     regime: 'LUNAR',
     mission: 'LRO',
@@ -90,6 +96,7 @@ export const DSO_REGISTRY = [
     mission: 'Artemis II',
     description: 'First crewed mission of NASA’s Artemis program, planned to fly astronauts around the Moon and return to Earth.',
     launchDate: '2026-04-03', // Updated expected timeframe (subject to change)
+    validFutureWindowSec: 21_600,
     searchAliases: ['artemis', 'artemis ii', 'artemis 2', 'nasa artemis ii'],
   }),
   createRegistryEntry({

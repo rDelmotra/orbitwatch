@@ -6,6 +6,7 @@ import type {
   ProviderSample,
 } from './types.js';
 import { logger } from '../../utils/logger.js';
+import { deriveClampedRetryWindowFromError } from './horizons-coverage.js';
 
 const HORIZONS_API_URL = 'https://ssd.jpl.nasa.gov/api/horizons.api';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -97,6 +98,7 @@ function toIsoCalendarDateTdb(calendarDateRaw: string): string {
   }
 
   const [, year, monthToken, day, time] = match;
+  const normalizedMonthToken = `${monthToken[0].toUpperCase()}${monthToken.slice(1).toLowerCase()}`;
   const month = {
     Jan: '01',
     Feb: '02',
@@ -110,13 +112,17 @@ function toIsoCalendarDateTdb(calendarDateRaw: string): string {
     Oct: '10',
     Nov: '11',
     Dec: '12',
-  }[monthToken];
+  }[normalizedMonthToken];
 
   if (!month) {
     throw new HorizonsParseError(`Unexpected Horizons month token: ${monthToken}`);
   }
 
   return `${year}-${month}-${day}T${time}`;
+}
+
+function formatWindowRange(windowStart: Date, windowEnd: Date): string {
+  return `${windowStart.toISOString()}..${windowEnd.toISOString()}`;
 }
 
 function extractApiErrorMessage(data: unknown): string | null {
@@ -311,12 +317,55 @@ async function requestHorizons(
   }
 }
 
+async function requestHorizonsWithCoverageClamp(
+  entry: DsoRegistryEntry,
+  windowStart: Date,
+  windowEnd: Date,
+): Promise<ProviderFetchResult> {
+  try {
+    return await requestHorizons(entry, windowStart, windowEnd);
+  } catch (error) {
+    if (!(error instanceof HorizonsObjectNotFoundError)) {
+      throw error;
+    }
+
+    const clampedWindow = deriveClampedRetryWindowFromError(
+      entry,
+      windowStart,
+      windowEnd,
+      error.message,
+    );
+
+    if (!clampedWindow) {
+      throw new HorizonsObjectNotFoundError(
+        `${error.message} (requestedWindow=${formatWindowRange(windowStart, windowEnd)}; no valid clamped retry window)`,
+      );
+    }
+
+    logger.warn(
+      `Horizons range clamp retry for ${entry.dsoId}: requestedWindow=${formatWindowRange(windowStart, windowEnd)} clampedWindow=${formatWindowRange(clampedWindow.windowStart, clampedWindow.windowEnd)}`,
+    );
+
+    try {
+      return await requestHorizons(entry, clampedWindow.windowStart, clampedWindow.windowEnd);
+    } catch (retryError) {
+      if (retryError instanceof HorizonsObjectNotFoundError) {
+        throw new HorizonsObjectNotFoundError(
+          `${retryError.message} (requestedWindow=${formatWindowRange(windowStart, windowEnd)} clampedWindow=${formatWindowRange(clampedWindow.windowStart, clampedWindow.windowEnd)})`,
+        );
+      }
+
+      throw retryError;
+    }
+  }
+}
+
 export class HorizonsProvider implements DsoProviderAdapter {
   async fetchEphemeris(
     entry: DsoRegistryEntry,
     windowStart: Date,
     windowEnd: Date,
   ): Promise<ProviderFetchResult> {
-    return runSerialized(() => requestHorizons(entry, windowStart, windowEnd));
+    return runSerialized(() => requestHorizonsWithCoverageClamp(entry, windowStart, windowEnd));
   }
 }

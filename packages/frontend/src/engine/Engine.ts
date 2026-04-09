@@ -14,9 +14,29 @@ import { OrbitTrailRenderer } from './OrbitTrailRenderer';
 import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
+import type { DsoSnapshot } from '../data/dso-types';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
+const DSO_VALID_TO_GRACE_SEC = 600;
+const DSO_TRAIL_POINTS = 360;
+
+type DsoWorkerInMessage =
+  | {
+      type: 'INIT_SNAPSHOTS';
+      dsoIds: string[];
+      snapshots: Record<string, DsoSnapshot>;
+      validToGraceSec?: number;
+    }
+  | { type: 'SET_DSO_IDS'; dsoIds: string[] }
+  | { type: 'UPDATE_SNAPSHOT'; dsoId: string; snapshot: DsoSnapshot | null }
+  | { type: 'SET_VALID_TO_GRACE_SEC'; validToGraceSec: number }
+  | { type: 'TICK'; timestamp: number }
+  | { type: 'BUILD_TRAIL'; dsoId: string; pointCount?: number };
+
+type DsoWorkerOutMessage =
+  | { type: 'POSITIONS'; positions: Float32Array; visibleFlags: Uint8Array }
+  | { type: 'TRAIL'; dsoId: string; positions: Float32Array };
 
 export class Engine {
   private renderer: THREE.WebGLRenderer;
@@ -30,6 +50,8 @@ export class Engine {
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
   private worker: Worker | null = null;
+  private dsoWorker: Worker | null = null;
+  private dsoWorkerTickInFlight = false;
   private propagationInterval: ReturnType<typeof setInterval> | null = null;
   private objectCount = 0;
   private lastTickTime = 0;
@@ -46,6 +68,7 @@ export class Engine {
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
   private dsoUnsub: (() => void) | null = null;
+  private dsoEphemerisUnsub: (() => void) | null = null;
   private devValidation: DevValidation | null = null;
   private returnEndPos: THREE.Vector3 | null = null;
   private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
@@ -240,6 +263,8 @@ export class Engine {
         this.satelliteRenderer.setSatelliteSize(issIndex, 2.0);
       }
 
+      this.initDsoWorker();
+
       // ── DSO catalog subscription ────────────────────────────────────────────
       // Re-init DSO renderer whenever dsoObjects changes in the store.
       // initDsoClient() runs in parallel and writes to the store when ready.
@@ -249,6 +274,20 @@ export class Engine {
           prevDsoObjects = state.dsoObjects;
           this.dsoRenderer.init(state.dsoObjects, this.catalogData.length);
           this.gpuPicker?.addDsoGeometry(this.dsoRenderer.geometry, state.dsoObjects.length);
+          this.syncDsoWorkerState();
+          if (state.showOrbitTrail) {
+            this.refreshOrbitTrail(state);
+          }
+        }
+      });
+      let prevDsoEphemeris = useStore.getState().dsoEphemerisById;
+      this.dsoEphemerisUnsub = useStore.subscribe((state) => {
+        if (state.dsoEphemerisById !== prevDsoEphemeris) {
+          prevDsoEphemeris = state.dsoEphemerisById;
+          this.syncDsoWorkerState();
+          if (state.showOrbitTrail && state.selectedDso) {
+            this.requestDsoTrail(state.selectedDso.dsoId);
+          }
         }
       });
 
@@ -314,19 +353,24 @@ export class Engine {
 
       // ── Orbit trail subscription ─────────────────────────────────────────────
       let prevShowTrail = useStore.getState().showOrbitTrail;
+      let prevSelectedIndex = useStore.getState().selectedIndex;
+      let prevSelectedDsoId = useStore.getState().selectedDso?.dsoId ?? null;
       this.trailUnsub = useStore.subscribe((state) => {
-        if (state.showOrbitTrail !== prevShowTrail) {
-          prevShowTrail = state.showOrbitTrail;
-          if (state.showOrbitTrail) {
-            const idx = state.selectedIndex;
-            if (idx !== null && idx >= 0 && idx < this.catalogData.length) {
-              const sat = this.catalogData[idx];
-              this.orbitTrailRenderer.generate(sat.line1, sat.line2);
-            }
-          } else {
-            this.orbitTrailRenderer.clear();
-          }
+        const selectedDsoId = state.selectedDso?.dsoId ?? null;
+        const changed =
+          state.showOrbitTrail !== prevShowTrail ||
+          state.selectedIndex !== prevSelectedIndex ||
+          selectedDsoId !== prevSelectedDsoId;
+
+        if (!changed) {
+          return;
         }
+
+        prevShowTrail = state.showOrbitTrail;
+        prevSelectedIndex = state.selectedIndex;
+        prevSelectedDsoId = selectedDsoId;
+
+        this.refreshOrbitTrail(state);
       });
 
       console.log(`Loaded ${tles.length} TLEs from backend`);
@@ -396,6 +440,83 @@ export class Engine {
     }
   }
 
+  private initDsoWorker(): void {
+    this.dsoWorker?.terminate();
+    this.dsoWorkerTickInFlight = false;
+
+    this.dsoWorker = new Worker(
+      new URL('../workers/dso.worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+
+    this.dsoWorker.onmessage = (event: MessageEvent<DsoWorkerOutMessage>) => {
+      const msg = event.data;
+      if (msg.type === 'POSITIONS') {
+        this.dsoWorkerTickInFlight = false;
+        this.dsoRenderer.updateFromWorkerBuffers(msg.positions, msg.visibleFlags);
+        return;
+      }
+
+      const state = useStore.getState();
+      if (!state.showOrbitTrail || state.selectedDso?.dsoId !== msg.dsoId) {
+        return;
+      }
+      this.orbitTrailRenderer.generateFromPositions(msg.positions);
+    };
+
+    this.syncDsoWorkerState();
+  }
+
+  private syncDsoWorkerState(): void {
+    if (!this.dsoWorker) {
+      return;
+    }
+
+    const state = useStore.getState();
+    this.dsoWorker.postMessage({
+      type: 'INIT_SNAPSHOTS',
+      dsoIds: state.dsoObjects.map((dso) => dso.dsoId),
+      snapshots: state.dsoEphemerisById,
+      validToGraceSec: DSO_VALID_TO_GRACE_SEC,
+    } satisfies DsoWorkerInMessage);
+  }
+
+  private requestDsoTrail(dsoId: string): void {
+    if (!this.dsoWorker) {
+      this.orbitTrailRenderer.clear();
+      return;
+    }
+
+    this.dsoWorker.postMessage({
+      type: 'BUILD_TRAIL',
+      dsoId,
+      pointCount: DSO_TRAIL_POINTS,
+    } satisfies DsoWorkerInMessage);
+  }
+
+  private refreshOrbitTrail(
+    state: ReturnType<typeof useStore.getState> = useStore.getState(),
+  ): void {
+    if (!state.showOrbitTrail) {
+      this.orbitTrailRenderer.clear();
+      return;
+    }
+
+    const selectedIndex = state.selectedIndex;
+    if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
+      const sat = this.catalogData[selectedIndex];
+      this.orbitTrailRenderer.generate(sat.line1, sat.line2);
+      return;
+    }
+
+    if (state.selectedDso) {
+      this.requestDsoTrail(state.selectedDso.dsoId);
+      return;
+    }
+
+    this.orbitTrailRenderer.clear();
+  }
+
   start(): void {
     this.clock.start();
     this.loop();
@@ -420,9 +541,15 @@ export class Engine {
 
     this.devValidation?.tickFrame();
 
-    // ── DSO position update (every frame, from interpolator) ─────────────────
+    // ── DSO position update (worker-driven) ───────────────────────────────────
     const store = useStore.getState();
-    this.dsoRenderer.updatePositions(store.dsoEphemerisById, Date.now());
+    if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
+      this.dsoWorker.postMessage({
+        type: 'TICK',
+        timestamp: Date.now(),
+      } satisfies DsoWorkerInMessage);
+      this.dsoWorkerTickInFlight = true;
+    }
     this.dsoRenderer.updateUniforms(this.renderer.getPixelRatio());
 
     // ── DSO label screen positions ────────────────────────────────────────────
@@ -816,7 +943,10 @@ export class Engine {
     this.filterUnsub?.();
     this.trailUnsub?.();
     this.dsoUnsub?.();
+    this.dsoEphemerisUnsub?.();
     this.worker?.terminate();
+    this.dsoWorker?.terminate();
+    this.dsoWorkerTickInFlight = false;
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);

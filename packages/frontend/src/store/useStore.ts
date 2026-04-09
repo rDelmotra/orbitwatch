@@ -233,7 +233,7 @@ export const useStore = create<AppState>((set) => ({
       selectedDso: dso,
       // Clear TLE selection when selecting a DSO
       ...(dso !== null
-        ? { selectedIndex: null, selectedSatellite: null, selectedAltitude: null, showOrbitTrail: false }
+        ? { selectedIndex: null, selectedSatellite: null, selectedAltitude: null }
         : {}),
       // Deselecting during tracking: smooth return
       ...(dso === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')

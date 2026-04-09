@@ -100,7 +100,7 @@ export class DsoRenderer {
       pickArr[i * 3 + 1] = ((encoded >> 8)  & 0xFF) / 255;
       pickArr[i * 3 + 2] = ( encoded        & 0xFF) / 255;
 
-      // Start hidden; updatePositions() will set real size once ephemeris arrives
+      // Start hidden; update methods will set size once ephemeris arrives
       sizeArr[i] = 0;
     }
 
@@ -108,10 +108,50 @@ export class DsoRenderer {
     this.sizeAttr.needsUpdate   = true;
   }
 
-  /**
-   * Called every render frame. Reads ephemeris from the store snapshot map,
-   * interpolates to now, and pushes TEME→Three.js positions into the geometry.
-   */
+  /** Applies worker-computed TEME positions + visibility flags each frame. */
+  updateFromWorkerBuffers(positionsTeme: Float32Array, visibleFlags: Uint8Array): void {
+    const posArr = this.currPosAttr.array as Float32Array;
+    const prevArr = this.prevPosAttr.array as Float32Array;
+    const sizeArr = this.sizeAttr.array as Float32Array;
+
+    prevArr.set(posArr.subarray(0, this.activeCount * 3));
+
+    const maxCount = Math.min(
+      this.activeCount,
+      visibleFlags.length,
+      Math.floor(positionsTeme.length / 3),
+    );
+
+    for (let i = 0; i < this.activeCount; i++) {
+      const i3 = i * 3;
+      const isVisible = i < maxCount && visibleFlags[i] > 0;
+
+      if (!isVisible) {
+        posArr[i3] = posArr[i3 + 1] = posArr[i3 + 2] = 0;
+        sizeArr[i] = 0;
+        continue;
+      }
+
+      const x = positionsTeme[i3];
+      const y = positionsTeme[i3 + 1];
+      const z = positionsTeme[i3 + 2];
+
+      // TEME → Three.js axis swap (same convention as SatelliteRenderer):
+      //   TEME X → Three.js X
+      //   TEME Z → Three.js Y
+      //   TEME Y → Three.js -Z
+      posArr[i3] = x;
+      posArr[i3 + 1] = z;
+      posArr[i3 + 2] = -y;
+      sizeArr[i] = DSO_BASE_SIZE;
+    }
+
+    this.currPosAttr.needsUpdate = true;
+    this.prevPosAttr.needsUpdate = true;
+    this.sizeAttr.needsUpdate = true;
+  }
+
+  /** Legacy main-thread interpolation path (kept as fallback). */
   updatePositions(
     ephemerisById: Record<string, DsoSnapshot>,
     timestampMs: number,

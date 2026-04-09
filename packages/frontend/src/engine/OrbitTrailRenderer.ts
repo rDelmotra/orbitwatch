@@ -36,7 +36,7 @@ const TRAIL_FRAG = `
 
 export class OrbitTrailRenderer {
   private scene: THREE.Scene;
-  private line: THREE.LineLoop | null = null;
+  private line: THREE.Line | null = null;
   private glow: THREE.Points | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private lineMaterial: THREE.LineBasicMaterial | null = null;
@@ -44,6 +44,39 @@ export class OrbitTrailRenderer {
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  private createTrailObjects(positions: Float32Array, closeLoop: boolean): void {
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    this.lineMaterial = new THREE.LineBasicMaterial({
+      color: 0x00E5FF,
+      transparent: true,
+      opacity: 0.6,
+    });
+    this.line = closeLoop
+      ? new THREE.LineLoop(this.geometry, this.lineMaterial)
+      : new THREE.Line(this.geometry, this.lineMaterial);
+    this.line.frustumCulled = false;
+
+    this.glowMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(0x00E5FF) },
+        uPixelRatio: { value: window.devicePixelRatio },
+        uPointSize: { value: 6.0 },
+      },
+      vertexShader: TRAIL_VERT,
+      fragmentShader: TRAIL_FRAG,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.glow = new THREE.Points(this.geometry, this.glowMaterial);
+    this.glow.frustumCulled = false;
+
+    this.scene.add(this.line);
+    this.scene.add(this.glow);
   }
 
   generate(line1: string, line2: string): void {
@@ -78,36 +111,35 @@ export class OrbitTrailRenderer {
       positions[i * 3 + 2] = lastValidZ;
     }
 
-    this.geometry = new THREE.BufferGeometry();
-    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this.createTrailObjects(positions, true);
+  }
 
-    // 1. Sharp Core (1px solid line)
-    this.lineMaterial = new THREE.LineBasicMaterial({
-      color: 0x00E5FF,
-      transparent: true,
-      opacity: 0.6,
-    });
-    this.line = new THREE.LineLoop(this.geometry, this.lineMaterial);
-    this.line.frustumCulled = false;
+  /**
+   * Builds a DSO trail from packed TEME coordinates [x, y, z, ...] in Earth radii.
+   * Uses an open polyline because DSO windows are finite and non-periodic.
+   */
+  generateFromPositions(positionsTeme: Float32Array): void {
+    this.clear();
 
-    // 2. Soft Glow Envelope (Points-based glow)
-    this.glowMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Color(0x00E5FF) },
-        uPixelRatio: { value: window.devicePixelRatio },
-        uPointSize: { value: 6.0 },
-      },
-      vertexShader: TRAIL_VERT,
-      fragmentShader: TRAIL_FRAG,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.glow = new THREE.Points(this.geometry, this.glowMaterial);
-    this.glow.frustumCulled = false;
+    const pointCount = Math.floor(positionsTeme.length / 3);
+    if (pointCount < 2) {
+      return;
+    }
 
-    this.scene.add(this.line);
-    this.scene.add(this.glow);
+    const positions = new Float32Array(pointCount * 3);
+    for (let i = 0; i < pointCount; i++) {
+      const i3 = i * 3;
+      const x = positionsTeme[i3];
+      const y = positionsTeme[i3 + 1];
+      const z = positionsTeme[i3 + 2];
+
+      // TEME → Three.js axis swap (x, z, -y)
+      positions[i3] = x;
+      positions[i3 + 1] = z;
+      positions[i3 + 2] = -y;
+    }
+
+    this.createTrailObjects(positions, false);
   }
 
   clear(): void {
@@ -135,4 +167,3 @@ export class OrbitTrailRenderer {
     this.clear();
   }
 }
-
