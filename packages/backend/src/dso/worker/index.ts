@@ -14,6 +14,7 @@
  * Filled in by:
  * - a later phase that adds the DSO worker entrypoint and reconcile logic
  */
+import { setTimeout } from 'node:timers/promises';
 import { convertProviderFetchToDsoSnapshot, validateDsoSnapshot } from '../normalize/index.js';
 import {
   getEnabledDsoRegistryEntries,
@@ -35,19 +36,13 @@ const LOOP_JITTER_RATIO = 0.1;
 const MIN_LOOP_INTERVAL_MS = 1_000;
 
 export interface DsoWorkerLoopOptions {
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
   onIterationError?: (error: unknown) => void;
 }
 
 export interface DsoWorkerControls {
   stop: () => void;
   run: Promise<void>;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 function parseIsoTimestamp(value: string | null): number {
@@ -179,13 +174,14 @@ export async function reconcileDsoWorkerOnce(
 }
 
 export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorkerControls {
-  const enabledEntries = getEnabledDsoRegistryEntries();
-  const delaySleep = options.sleep ?? sleep;
+  const delaySleep = options.sleep ?? setTimeout;
+  const abortController = new AbortController();
   let stopRequested = false;
 
   const run = (async () => {
+    const initialEntries = getEnabledDsoRegistryEntries();
     logger.info(
-      `DSO worker starting with ${enabledEntries.length} enabled object(s): ${enabledEntries.map((entry) => entry.dsoId).join(', ') || 'none'}`,
+      `DSO worker starting with ${initialEntries.length} enabled object(s): ${initialEntries.map((entry) => entry.dsoId).join(', ') || 'none'}`,
     );
 
     while (!stopRequested) {
@@ -200,9 +196,18 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
         break;
       }
 
-      const delayMs = computeLoopDelayMs(enabledEntries);
+      const activeEntries = getEnabledDsoRegistryEntries();
+      const delayMs = computeLoopDelayMs(activeEntries);
       logger.info(`DSO worker sleeping for ${delayMs}ms before next reconcile`);
-      await delaySleep(delayMs);
+
+      try {
+        await delaySleep(delayMs, { signal: abortController.signal });
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          break;
+        }
+        throw err;
+      }
     }
 
     logger.info('DSO worker stopped');
@@ -211,6 +216,7 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
   return {
     stop: () => {
       stopRequested = true;
+      abortController.abort();
     },
     run,
   };

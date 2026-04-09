@@ -175,6 +175,11 @@ async function pruneSnapshotGenerations(dsoId: DsoId): Promise<void> {
       .sort((left, right) => right.localeCompare(left));
 
     const filesToDelete = snapshotFiles.slice(SNAPSHOT_RETENTION_COUNT);
+    
+    // Also prune any orphaned .tmp files left over from aborted atomic writes
+    const tmpFiles = files.filter((fileName) => fileName.endsWith('.tmp'));
+    filesToDelete.push(...tmpFiles);
+
     await Promise.all(filesToDelete.map((fileName) => fs.unlink(path.join(snapshotDir, fileName))));
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;

@@ -14,4 +14,4 @@
  * Filled in by:
  * - a later phase that adds DSO API routes backed by published cache artifacts
  */
-export {};
+export { default as dsoRouter, summarizeDsoHealth } from '../../routes/dso.js';
