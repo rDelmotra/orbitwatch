@@ -17,8 +17,8 @@ import type { DsoId, DsoRegistryEntry } from './types.js';
 
 const DEFAULT_SAMPLE_STEP_SEC = 600;
 const DEFAULT_REFRESH_INTERVAL_SEC = 21_600;
-const DEFAULT_VALID_PAST_WINDOW_SEC = 21_600;
-const DEFAULT_VALID_FUTURE_WINDOW_SEC = 259_200;
+const DEFAULT_VALID_PAST_WINDOW_SEC = 864_000; // 10 days
+const DEFAULT_VALID_FUTURE_WINDOW_SEC = 259_200; // 3 days
 
 function createRegistryEntry(
   entry: Omit<

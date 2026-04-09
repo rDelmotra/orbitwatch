@@ -53,8 +53,17 @@ function parseIsoTimestamp(value: string | null): number {
 }
 
 function computeWindow(entry: DsoRegistryEntry, now: Date): { windowStart: Date; windowEnd: Date } {
+  let windowStartMs = now.getTime() - entry.validPastWindowSec * 1000;
+
+  if (entry.launchDate) {
+    const launchDateMs = new Date(entry.launchDate).getTime();
+    if (Number.isFinite(launchDateMs) && windowStartMs < launchDateMs) {
+      windowStartMs = launchDateMs;
+    }
+  }
+
   return {
-    windowStart: new Date(now.getTime() - entry.validPastWindowSec * 1000),
+    windowStart: new Date(windowStartMs),
     windowEnd: new Date(now.getTime() + entry.validFutureWindowSec * 1000),
   };
 }
