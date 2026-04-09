@@ -4,7 +4,7 @@ export interface TLEInput {
     line2: string
 }
 
-export type ObjectCategory = 'active_satellite' | 'inactive_satellite' | 'rocket_body' | 'debris' | 'unknown';
+export type ObjectCategory = 'active_satellite' | 'inactive_satellite' | 'rocket_body' | 'debris' | 'unknown' | 'deep_space';
 export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER';
 
 export interface EnrichedTLEObject {

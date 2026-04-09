@@ -7,6 +7,7 @@ const CATEGORY_LABELS: Record<ObjectCategory, string> = {
   rocket_body: 'Rocket Body',
   debris: 'Debris',
   unknown: 'Unknown',
+  deep_space: 'Deep Space',
 };
 
 const panelStyle: React.CSSProperties = {

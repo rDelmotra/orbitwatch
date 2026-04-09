@@ -199,6 +199,7 @@ export class Engine {
         rocket_body: 0,
         debris: 0,
         unknown: 0,
+        deep_space: 0,
       };
       const regimeCounts: Record<OrbitalRegime, number> = {
         LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,

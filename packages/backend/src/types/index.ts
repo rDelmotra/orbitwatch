@@ -117,7 +117,8 @@ export type ObjectCategory =
   | 'inactive_satellite'
   | 'rocket_body'
   | 'debris'
-  | 'unknown';
+  | 'unknown'
+  | 'deep_space';
 
 export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER';
 

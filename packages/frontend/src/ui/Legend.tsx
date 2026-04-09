@@ -7,6 +7,7 @@ const CATEGORIES: { key: ObjectCategory; label: string; color: string }[] = [
   { key: 'rocket_body', label: 'Rocket Bodies', color: '#FFC107' },
   { key: 'debris', label: 'Debris', color: '#F44336' },
   { key: 'unknown', label: 'Unknown', color: '#757575' },
+  { key: 'deep_space', label: 'Deep Space', color: '#00BCD4' },
 ];
 
 const panelStyle: React.CSSProperties = {

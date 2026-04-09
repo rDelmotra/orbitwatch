@@ -9,6 +9,7 @@ const CATEGORY_COLORS: Record<ObjectCategory, string> = {
   rocket_body: '#FFC107',
   debris: '#F44336',
   unknown: '#757575',
+  deep_space: '#00BCD4',
 };
 
 const DEBOUNCE_MS = 150;

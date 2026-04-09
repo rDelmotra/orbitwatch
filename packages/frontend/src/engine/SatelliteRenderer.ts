@@ -13,6 +13,7 @@ const CATEGORY_COLORS: Record<string, [number, number, number]> = {
   rocket_body:        [1.000, 0.757, 0.027],
   debris:             [0.957, 0.263, 0.212],
   unknown:            [0.459, 0.459, 0.459],
+  deep_space:         [0.000, 0.737, 0.831],
 };
 
 export class SatelliteRenderer {
@@ -194,7 +195,7 @@ export class SatelliteRenderer {
     prevSizeArr.set(currSizeArr);
 
     const catCounts: Record<ObjectCategory, number> = {
-      active_satellite: 0, inactive_satellite: 0, rocket_body: 0, debris: 0, unknown: 0,
+      active_satellite: 0, inactive_satellite: 0, rocket_body: 0, debris: 0, unknown: 0, deep_space: 0,
     };
     const regCounts: Record<OrbitalRegime, number> = {
       LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
+import type { DsoObject, DsoSnapshot, TrackedObject } from '../data/dso-types';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
@@ -23,6 +24,12 @@ interface AppState {
   selectedSatellite: EnrichedTLEObject | null;
   selectedAltitude: number | null;
   showOrbitTrail: boolean;
+
+  // DSO state
+  dsoObjects: DsoObject[];
+  dsoEphemerisById: Record<string, DsoSnapshot>;
+  dsoCount: number;
+  selectedDso: DsoObject | null;
 
   hoveredName: string | null;
   hoverScreenX: number;
@@ -71,6 +78,12 @@ interface AppState {
   clearCluster: () => void;
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
+
+  // DSO actions
+  setDsoObjects: (objects: DsoObject[]) => void;
+  setDsoEphemeris: (dsoId: string, snapshot: DsoSnapshot) => void;
+  setSelectedDso: (dso: DsoObject | null) => void;
+  clearDsoEphemeris: (dsoId: string) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -84,6 +97,7 @@ export const useStore = create<AppState>((set) => ({
     rocket_body: 0,
     debris: 0,
     unknown: 0,
+    deep_space: 0,
   },
   dataVersion: null,
   dataTimestamp: null,
@@ -97,6 +111,11 @@ export const useStore = create<AppState>((set) => ({
   selectedSatellite: null,
   selectedAltitude: null,
   showOrbitTrail: false,
+
+  dsoObjects: [],
+  dsoEphemerisById: {},
+  dsoCount: 0,
+  selectedDso: null,
 
   hoveredName: null,
   hoverScreenX: 0,
@@ -115,6 +134,7 @@ export const useStore = create<AppState>((set) => ({
     rocket_body: true,
     debris: true,
     unknown: true,
+    deep_space: true,
   },
   regimeFilters: { LEO: true, MEO: true, GEO: true, HEO: true, OTHER: true },
   regimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
@@ -124,6 +144,7 @@ export const useStore = create<AppState>((set) => ({
     rocket_body: 0,
     debris: 0,
     unknown: 0,
+    deep_space: 0,
   },
   visibleRegimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
 
@@ -166,6 +187,8 @@ export const useStore = create<AppState>((set) => ({
       selectedSatellite: data,
       selectedAltitude: altitude ?? null,
       showOrbitTrail: false,
+      // Clear DSO selection when selecting a TLE object
+      ...(index !== null ? { selectedDso: null } : {}),
       // Deselecting during tracking: smooth return to Earth-centered view
       ...(index === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')
         ? { cameraMode: 'returning' as CameraMode }
@@ -187,4 +210,40 @@ export const useStore = create<AppState>((set) => ({
   clearCluster: () => set({ clusterItems: [] }),
   setObserverLocation: (loc) => set({ observerLocation: loc }),
   setVisibilityMode: (mode) => set({ visibilityMode: mode }),
+
+  setDsoObjects: (objects) =>
+    set((state) => ({
+      dsoObjects: objects,
+      dsoCount: objects.length,
+      categoryCounts: { ...state.categoryCounts, deep_space: objects.length },
+    })),
+  setDsoEphemeris: (dsoId, snapshot) =>
+    set((state) => ({
+      dsoEphemerisById: { ...state.dsoEphemerisById, [dsoId]: snapshot },
+    })),
+  setSelectedDso: (dso) =>
+    set((state) => ({
+      selectedDso: dso,
+      // Clear TLE selection when selecting a DSO
+      ...(dso !== null
+        ? { selectedIndex: null, selectedSatellite: null, selectedAltitude: null, showOrbitTrail: false }
+        : {}),
+      // Deselecting during tracking: smooth return
+      ...(dso === null && (state.cameraMode === 'flying' || state.cameraMode === 'following')
+        ? { cameraMode: 'returning' as CameraMode }
+        : {}),
+    })),
+  clearDsoEphemeris: (dsoId) =>
+    set((state) => {
+      const next = { ...state.dsoEphemerisById };
+      delete next[dsoId];
+      return { dsoEphemerisById: next };
+    }),
 }));
+
+/** Selector: currently selected object as a TrackedObject, or null. */
+export function selectTrackedObject(state: AppState): TrackedObject | null {
+  if (state.selectedDso) return state.selectedDso;
+  if (state.selectedSatellite) return { ...state.selectedSatellite, source: 'tle' as const };
+  return null;
+}
