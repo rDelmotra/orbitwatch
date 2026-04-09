@@ -219,6 +219,21 @@ export interface PublishDsoSnapshotResult {
   snapshotPath: string;
 }
 
+export async function publishDsoWorkerHeartbeat(
+  currentManifest: DsoManifest | null = null,
+  workerLastRunAt: string = new Date().toISOString(),
+): Promise<{ manifest: DsoManifest; catalog: DsoCatalog }> {
+  const manifest = coerceManifest(DSO_REGISTRY, currentManifest);
+  manifest.generatedAt = workerLastRunAt;
+  manifest.workerLastRunAt = workerLastRunAt;
+
+  const catalog = buildDsoCatalog(DSO_REGISTRY, manifest);
+  await atomicWriteJson(getDsoCatalogPath(), catalog);
+  await atomicWriteJson(getDsoManifestPath(), manifest);
+
+  return { manifest, catalog };
+}
+
 export async function publishDsoSnapshot(
   entry: DsoRegistryEntry,
   snapshot: DsoSnapshot,
