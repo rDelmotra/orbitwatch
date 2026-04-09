@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import pickingVertexShader from '../shaders/picking.vert.glsl?raw';
 import pickingFragmentShader from '../shaders/picking.frag.glsl?raw';
+import dsoPickingVertexShader from '../shaders/dso-picking.vert.glsl?raw';
 import type { SatelliteRenderer } from './SatelliteRenderer';
 
 const PICK_TARGET_SIZE = 512;
@@ -11,13 +12,16 @@ export class GPUPicker {
   private readonly renderTarget: THREE.WebGLRenderTarget;
   private readonly pickScene: THREE.Scene;
   private readonly pickMaterial: THREE.ShaderMaterial;
+  private readonly dsoPickMaterial: THREE.ShaderMaterial;
   private readonly pickMesh: THREE.Points;
   private readonly earthOccluder: THREE.Mesh;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly pixelBuffer = new Uint8Array(4);
   private readonly areaBuffer = new Uint8Array(SAMPLE_SIZE * SAMPLE_SIZE * 4);
-  private readonly catalogSize: number;
+  private readonly catalogSize: number;  // TLE-only count
+  private dsoCount = 0;                  // DSO count, set after init
+  private dsoPickMesh: THREE.Points | null = null;
   private readonly sizeAttr: THREE.BufferAttribute;
 
   constructor(
@@ -45,6 +49,21 @@ export class GPUPicker {
       uniforms: {
         uPixelRatio: { value: 1.0 },
         uCameraDistance: { value: 5.0 },
+        uT: { value: 0.0 },
+      },
+      depthWrite: true,
+      depthTest: true,
+      blending: THREE.NoBlending,
+      toneMapped: false,
+    });
+
+    // Separate picking material for DSOs — no distance fade so they remain
+    // pickable at deep-space distances (JWST ~235 ER, LRO ~60 ER, etc.)
+    this.dsoPickMaterial = new THREE.ShaderMaterial({
+      vertexShader: dsoPickingVertexShader,
+      fragmentShader: pickingFragmentShader,
+      uniforms: {
+        uPixelRatio: { value: 1.0 },
         uT: { value: 0.0 },
       },
       depthWrite: true,
@@ -142,14 +161,17 @@ export class GPUPicker {
     const seen = new Set<number>();
     for (let i = 0; i < w * h; i++) {
       const idx = this.decodePixel(this.areaBuffer, i * 4);
-      if (idx >= 0 && idx < this.catalogSize) {
+      if (idx >= 0 && idx < this.totalCount) {
         seen.add(idx);
       }
     }
 
-    // Sort by size descending (most visually prominent first)
+    // Sort by size descending.  DSO indices (>= catalogSize) use a large
+    // constant size so they sort to the front when clicked directly.
     const indices = Array.from(seen);
-    indices.sort((a, b) => this.sizeAttr.getX(b) - this.sizeAttr.getX(a));
+    const sizeOf = (i: number) =>
+      i < this.catalogSize ? this.sizeAttr.getX(i) : 5.0;
+    indices.sort((a, b) => sizeOf(b) - sizeOf(a));
     return indices;
   }
 
@@ -165,20 +187,50 @@ export class GPUPicker {
     this.restoreState();
 
     const idx = this.decodePixel(this.pixelBuffer, 0);
-    if (idx < 0 || idx >= this.catalogSize) return null;
+    if (idx < 0 || idx >= this.totalCount) return null;
     return idx;
+  }
+
+  /**
+   * Register DSO geometry for picking.  The geometry must have the same
+   * attributes as the TLE geometry (previousPosition, currentPosition, size,
+   * pickId) so it can share the picking material.  Safe to call multiple times
+   * as the DSO catalog grows.
+   */
+  addDsoGeometry(geometry: THREE.BufferGeometry, dsoCount: number): void {
+    if (this.dsoPickMesh) {
+      this.pickScene.remove(this.dsoPickMesh);
+      this.dsoPickMesh = null;
+    }
+    if (dsoCount > 0) {
+      this.dsoPickMesh = new THREE.Points(geometry, this.dsoPickMaterial);
+      this.dsoPickMesh.frustumCulled = false;
+      this.pickScene.add(this.dsoPickMesh);
+    }
+    this.dsoCount = dsoCount;
+  }
+
+  private get totalCount(): number {
+    return this.catalogSize + this.dsoCount;
   }
 
   syncUniforms(uT: number, uCameraDistance: number, uPixelRatio: number): void {
     this.pickMaterial.uniforms.uT.value = uT;
     this.pickMaterial.uniforms.uCameraDistance.value = uCameraDistance;
     this.pickMaterial.uniforms.uPixelRatio.value = uPixelRatio;
+    this.dsoPickMaterial.uniforms.uT.value = uT;
+    this.dsoPickMaterial.uniforms.uPixelRatio.value = uPixelRatio;
   }
 
   dispose(): void {
     this.renderTarget.dispose();
     this.pickMaterial.dispose();
+    this.dsoPickMaterial.dispose();
     this.pickMesh.parent?.remove(this.pickMesh);
+    if (this.dsoPickMesh) {
+      this.dsoPickMesh.parent?.remove(this.dsoPickMesh);
+      this.dsoPickMesh = null;
+    }
     this.earthOccluder.geometry.dispose();
     (this.earthOccluder.material as THREE.Material).dispose();
   }

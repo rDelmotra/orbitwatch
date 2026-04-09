@@ -10,6 +10,41 @@ import { ClusterPopup } from './ui/ClusterPopup';
 import { DevOverlay } from './ui/DevOverlay';
 import { useStore } from './store/useStore';
 
+function DsoLabels() {
+  const labelPositions = useStore((s) => s.dsoLabelPositions);
+  const loadingPhase = useStore((s) => s.loadingPhase);
+  if (loadingPhase !== 'ready') return null;
+
+  return (
+    <>
+      {labelPositions.map((label) => {
+        if (!label.visible) return null;
+        return (
+          <div
+            key={label.dsoId}
+            style={{
+              position: 'absolute',
+              left: label.screenX + 10,
+              top: label.screenY - 6,
+              color: '#00BCD4',
+              fontFamily: 'monospace',
+              fontSize: '11px',
+              fontWeight: 500,
+              letterSpacing: '0.05em',
+              pointerEvents: 'none',
+              textShadow: '0 0 6px rgba(0,188,212,0.7), 0 1px 3px rgba(0,0,0,0.9)',
+              whiteSpace: 'nowrap',
+              userSelect: 'none',
+            }}
+          >
+            {label.name}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function ResetViewButton() {
   const cameraMode = useStore((s) => s.cameraMode);
   const triggerResetCamera = useStore((s) => s.triggerResetCamera);
@@ -79,6 +114,7 @@ export default function App() {
         <SearchBar />
         <FilterPanel />
         <InfoCard />
+        <DsoLabels />
         <ResetViewButton />
       </div>
       <Tooltip />

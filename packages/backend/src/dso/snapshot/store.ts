@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DSO_REGISTRY,
   type DsoId,
@@ -18,7 +19,9 @@ import { atomicWriteJson } from '../../utils/atomic-write.js';
 const SNAPSHOT_RETENTION_COUNT = 3;
 
 export function getDsoCacheRoot(): string {
-  return path.resolve(process.env.CACHE_DIR ?? './data', 'dso');
+  if (process.env.CACHE_DIR) return path.resolve(process.env.CACHE_DIR, 'dso');
+  // Anchor to this file's location so the path is stable regardless of cwd
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../data', 'dso');
 }
 
 export function getDsoCatalogPath(): string {

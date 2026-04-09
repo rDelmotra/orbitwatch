@@ -6,12 +6,14 @@ import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import { fetchVisualNoradIds } from '../data/visualList';
 import { SatelliteRenderer } from './SatelliteRenderer';
+import { DsoRenderer } from './DsoRenderer';
 import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
 import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
+import { initDsoClient, stopDsoClient } from '../data/dso-client';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
@@ -26,6 +28,7 @@ export class Engine {
   private starfieldRenderer: StarfieldRenderer;
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
+  private dsoRenderer: DsoRenderer;
   private worker: Worker | null = null;
   private propagationInterval: ReturnType<typeof setInterval> | null = null;
   private objectCount = 0;
@@ -42,6 +45,7 @@ export class Engine {
   private cameraModeUnsub: (() => void) | null = null;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
+  private dsoUnsub: (() => void) | null = null;
   private devValidation: DevValidation | null = null;
   private returnEndPos: THREE.Vector3 | null = null;
   private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
@@ -70,7 +74,7 @@ export class Engine {
     // ── Controls ──────────────────────────────────────────────────────────────
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.minDistance = 1.08;
-    this.controls.maxDistance = 100;
+    this.controls.maxDistance = 300; // expanded from 100 to reach JWST (~235 ER)
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.07;
 
@@ -88,6 +92,9 @@ export class Engine {
 
     // ── Satellites ───────────────────────────────────────────────────────────
     this.satelliteRenderer = new SatelliteRenderer(this.scene);
+
+    // ── DSO renderer (always present, inited later when catalog arrives) ─────
+    this.dsoRenderer = new DsoRenderer(this.scene);
 
     // ── Orbit trail ─────────────────────────────────────────────────────────
     this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
@@ -110,13 +117,9 @@ export class Engine {
         this.controls.enabled = true;
         this.arrivalTime = -1;
 
-        // Context-aware controls.target on transition to free
         if (this.dragExitedFollowing) {
-          // target already set to satellite pos in onControlsStart, keep it
-          // reset the flag for next time
           this.dragExitedFollowing = false;
         } else if (this.returnEndPos) {
-          // finished returning animation, aim at Earth
           this.controls.target.set(0, 0, 0);
           this.returnEndPos = null;
         }
@@ -128,15 +131,13 @@ export class Engine {
         this.controls.enabled = false;
         this.arrivalTime = -1;
 
-        // Both contextual and hard reset need the start timer initialized
         this.cameraController.returnToHome(this.controls.target);
 
         if (this.useHardReset) {
           this.returnEndPos = HOME_POSITION.clone();
           this.returnEndTarget.copy(HOME_TARGET);
-          this.useHardReset = false; // reset flag
+          this.useHardReset = false;
         } else {
-          // Contextual pullback
           const dir = this.camera.position.clone().normalize();
           const currentDistance = this.camera.position.length();
           const targetDist = Math.max(currentDistance, HOME_POSITION.length());
@@ -145,13 +146,10 @@ export class Engine {
         }
       }
 
-      // Entering 'flying': controls disabled (Engine.flyToSatellite starts animation)
       if (state.cameraMode === 'flying') {
         this.controls.enabled = false;
       }
 
-      // Entering 'following': controls disabled so OrbitControls doesn't fire
-      // 'start' on clicks. Drag exit is handled in onPointerMove instead.
       if (state.cameraMode === 'following') {
         this.controls.enabled = false;
       }
@@ -192,7 +190,6 @@ export class Engine {
         line2: d.line2,
       }));
 
-      // Compute category counts for the UI legend
       const categoryCounts: Record<ObjectCategory, number> = {
         active_satellite: 0,
         inactive_satellite: 0,
@@ -215,19 +212,16 @@ export class Engine {
         version: response.version,
       });
 
-      // Retain catalog for index lookup after pick
       this.catalogData = catalogData;
 
-      // Expose catalog data and selectByIndex to the UI via the store
       useStore.getState().setCatalogData(catalogData);
       useStore.getState().setSelectByIndex((index: number) => this.selectByIndex(index));
       useStore.getState().setTriggerFlyTo((index: number) => this.flyToSatellite(index));
       useStore.getState().setTriggerResetCamera(() => this.resetCamera());
+      useStore.getState().setTriggerFlyToDso((dsoId: string) => this.flyToDso(dsoId));
 
-      // Initialize per-vertex colors (by category) and pick IDs
       this.satelliteRenderer.initFromCatalog(catalogData);
 
-      // Create GPU picker (shares geometry with satellite renderer)
       this.gpuPicker = new GPUPicker(
         this.renderer,
         this.camera,
@@ -235,20 +229,35 @@ export class Engine {
         catalogData.length,
       );
 
-      // Dev validation harness
       if (import.meta.env.DEV) {
         this.devValidation = new DevValidation();
         this.devValidation.initFromCatalog(catalogData);
       }
 
-      // Highlight the ISS: bright green, slightly larger but not overwhelming
       const issIndex = catalogData.findIndex((d) => d.noradId === 25544);
       if (issIndex !== -1) {
         this.satelliteRenderer.setSatelliteColor(issIndex, 0.2, 1.0, 0.4);
         this.satelliteRenderer.setSatelliteSize(issIndex, 2.0);
       }
 
-      // Subscribe to filter changes from the UI
+      // ── DSO catalog subscription ────────────────────────────────────────────
+      // Re-init DSO renderer whenever dsoObjects changes in the store.
+      // initDsoClient() runs in parallel and writes to the store when ready.
+      let prevDsoObjects = useStore.getState().dsoObjects;
+      this.dsoUnsub = useStore.subscribe((state) => {
+        if (state.dsoObjects !== prevDsoObjects) {
+          prevDsoObjects = state.dsoObjects;
+          this.dsoRenderer.init(state.dsoObjects, this.catalogData.length);
+          this.gpuPicker?.addDsoGeometry(this.dsoRenderer.geometry, state.dsoObjects.length);
+        }
+      });
+
+      // Start DSO pipeline in parallel — non-blocking
+      initDsoClient().catch((err) =>
+        console.warn('DSO client init error:', err),
+      );
+
+      // ── TLE filters subscription ────────────────────────────────────────────
       let prevCatFilters = useStore.getState().categoryFilters;
       let prevRegFilters = useStore.getState().regimeFilters;
       let prevVisMode = useStore.getState().visibilityMode;
@@ -289,12 +298,10 @@ export class Engine {
           );
           useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
-          // Update observer marker when location changes
           if (obsLocChanged) {
             this.updateObserverMarker(state.observerLocation);
           }
 
-          // Clear selection if filtered out
           const sel = useStore.getState().selectedIndex;
           if (sel !== null && sel < this.catalogData.length) {
             const sizeArr = this.satelliteRenderer.mesh.geometry.getAttribute('size').array as Float32Array;
@@ -305,7 +312,7 @@ export class Engine {
         }
       });
 
-      // Subscribe to orbit trail toggle
+      // ── Orbit trail subscription ─────────────────────────────────────────────
       let prevShowTrail = useStore.getState().showOrbitTrail;
       this.trailUnsub = useStore.subscribe((state) => {
         if (state.showOrbitTrail !== prevShowTrail) {
@@ -336,7 +343,6 @@ export class Engine {
           this.objectCount = msg.objectCount;
           console.log(`SGP4 worker ready: ${this.objectCount} objects`);
           useStore.getState().setLoadingPhase('propagating');
-          // Trigger first propagation immediately, then every 1s
           this.worker!.postMessage({ type: 'PROPAGATE', timestamp: Date.now() });
           this.propagationInterval = setInterval(() => {
             this.worker!.postMessage({ type: 'PROPAGATE', timestamp: Date.now() });
@@ -366,13 +372,12 @@ export class Engine {
             state.regimeFilters,
             this.visualNoradIds
           );
-          
+
           useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
           this.lastTickTime = performance.now();
           this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
-          // Dev validation: run checks on raw ECI positions
           this.devValidation?.runChecks(msg.positions, msg.validFlags, this.objectCount);
 
           if (!this.firstPositionReceived) {
@@ -401,13 +406,11 @@ export class Engine {
     const delta = this.clock.getDelta();
     const now = new Date();
 
-    // Sun direction in ECI frame — no rotation needed since the scene is inertial.
-    // Earth mesh rotates by GAST so its texture aligns with real geography.
     const sunDir = getSunDirection(now);
     this.earthRenderer.sunDirection.copy(sunDir);
     this.earthRenderer.object.rotation.y = getGAST(now);
 
-    // GPU-side interpolation: compute t from time since last propagation tick
+    // GPU-side interpolation factor for TLE positions
     let uT = 0.0;
     if (this.lastTickTime > 0) {
       const elapsed = performance.now() - this.lastTickTime;
@@ -417,18 +420,30 @@ export class Engine {
 
     this.devValidation?.tickFrame();
 
-    // ── Camera mode handling ────────────────────────────────────────────────
-    // CRITICAL: controls.update() only runs in 'free' mode. In all other modes
-    // the CameraController directly sets camera.position and lookAt, and we keep
-    // controls.target synced so OrbitControls can resume cleanly on exit.
+    // ── DSO position update (every frame, from interpolator) ─────────────────
     const store = useStore.getState();
+    this.dsoRenderer.updatePositions(store.dsoEphemerisById, Date.now());
+    this.dsoRenderer.updateUniforms(this.renderer.getPixelRatio());
+
+    // ── DSO label screen positions ────────────────────────────────────────────
+    const canvas = this.renderer.domElement;
+    const labelPositions = this.dsoRenderer.getScreenPositions(
+      this.camera,
+      canvas.clientWidth,
+      canvas.clientHeight,
+    );
+    useStore.getState().setDsoLabelPositions(labelPositions);
+
+    // ── Camera mode handling ─────────────────────────────────────────────────
     const cameraMode = store.cameraMode;
     const selectedIdx = store.selectedIndex;
+    const selectedDso = store.selectedDso;
 
     if (cameraMode === 'free') {
       this.controls.update();
 
     } else if (cameraMode === 'flying' && selectedIdx !== null) {
+      // TLE fly-to
       const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
       const radialDir = satPos.clone().normalize();
       const endCamPos = satPos.clone().add(
@@ -440,9 +455,37 @@ export class Engine {
         this.arrivalTime = performance.now();
       }
 
+    } else if (cameraMode === 'flying' && selectedDso !== null) {
+      // DSO fly-to
+      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
+      if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
+        const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
+        const radialDir = dsoPos.clone().normalize();
+        const endCamPos = dsoPos.clone().add(
+          radialDir.multiplyScalar(this.cameraController.followOffsetDist),
+        );
+        const done = this.cameraController.updateAnim(endCamPos, dsoPos, this.controls.target);
+        if (done) {
+          store.setCameraMode('following');
+          this.arrivalTime = performance.now();
+        }
+      } else {
+        // No ephemeris yet — stay in free until data arrives
+        store.setCameraMode('free');
+      }
+
     } else if (cameraMode === 'following' && selectedIdx !== null) {
+      // TLE follow
       const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
       this.cameraController.updateFollow(satPos, this.controls.target);
+
+    } else if (cameraMode === 'following' && selectedDso !== null) {
+      // DSO follow
+      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
+      if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
+        const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
+        this.cameraController.updateFollow(dsoPos, this.controls.target);
+      }
 
     } else if (cameraMode === 'returning') {
       const done = this.cameraController.updateAnim(
@@ -453,7 +496,7 @@ export class Engine {
       }
     }
 
-    // ── Selected-object shader uniforms ──────────────────────────────────────
+    // ── TLE selection shader uniforms ─────────────────────────────────────────
     const timeSinceArrival = this.arrivalTime > 0
       ? (performance.now() - this.arrivalTime) / 1000
       : -1.0;
@@ -461,6 +504,14 @@ export class Engine {
       selectedIdx !== null ? selectedIdx : -1,
       timeSinceArrival,
     );
+
+    // ── DSO selection shader uniform ──────────────────────────────────────────
+    if (selectedDso !== null) {
+      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
+      this.dsoRenderer.setSelectedDsoIndex(dsoIndex);
+    } else {
+      this.dsoRenderer.setSelectedDsoIndex(-1);
+    }
 
     this.earthRenderer.update(delta, this.camera);
     this.satelliteRenderer.updateUniforms(
@@ -480,20 +531,28 @@ export class Engine {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
-    // Drag detection for all non-free modes (controls are disabled in these modes).
     const mode = useStore.getState().cameraMode;
     if (this.pointerDownPos && mode !== 'free') {
       const dx = e.clientX - this.pointerDownPos.x;
       const dy = e.clientY - this.pointerDownPos.y;
       if (dx * dx + dy * dy > 25) {
         if (mode === 'following') {
-          // User is dragging while following — exit to free orbit around satellite
           this.dragExitedFollowing = true;
           const selectedIdx = useStore.getState().selectedIndex;
           if (selectedIdx !== null) {
             const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
             const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
             this.controls.target.copy(satPos);
+          } else {
+            // Following a DSO — aim controls at DSO position
+            const dso = useStore.getState().selectedDso;
+            const dsoObjects = useStore.getState().dsoObjects;
+            if (dso) {
+              const dsoIndex = dsoObjects.findIndex((d) => d.dsoId === dso.dsoId);
+              if (dsoIndex >= 0) {
+                this.controls.target.copy(this.dsoRenderer.getPositionAt(dsoIndex));
+              }
+            }
           }
           this.controls.enabled = true;
         }
@@ -517,8 +576,17 @@ export class Engine {
     const index = this.gpuPicker.pickSingle(screenX, screenY, rect.width, rect.height);
 
     if (index !== null && index < this.catalogData.length) {
+      // TLE hover
       canvas.style.cursor = 'pointer';
       useStore.getState().setHover(this.catalogData[index].name, e.clientX, e.clientY);
+    } else if (index !== null && index >= this.catalogData.length) {
+      // DSO hover
+      const dsoIndex = index - this.catalogData.length;
+      const dsoObjects = useStore.getState().dsoObjects;
+      if (dsoIndex < dsoObjects.length) {
+        canvas.style.cursor = 'pointer';
+        useStore.getState().setHover(dsoObjects[dsoIndex].name, e.clientX, e.clientY);
+      }
     } else {
       canvas.style.cursor = '';
       useStore.getState().setHover(null);
@@ -532,7 +600,6 @@ export class Engine {
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.pointerDownPos || !this.gpuPicker) return;
 
-    // Ignore drags: only pick if pointer moved less than 5px
     const dx = e.clientX - this.pointerDownPos.x;
     const dy = e.clientY - this.pointerDownPos.y;
     this.pointerDownPos = null;
@@ -549,24 +616,37 @@ export class Engine {
 
     if (gpuHits.length === 0) {
       store.setSelectedSatellite(null, null);
+      store.setSelectedDso(null);
       store.clearCluster();
       return;
     }
 
-    // Use the first GPU hit as the anchor for CPU proximity search
+    // pickArea sorts by visual size descending; DSOs use a constant 5.0 which
+    // beats any normal TLE, so gpuHits[0] is a DSO whenever one was directly
+    // clicked — even if stray TLE pixels bleed into the 5×5 sample area.
+    if (gpuHits[0] >= this.catalogData.length) {
+      const dsoIndex = gpuHits[0] - this.catalogData.length;
+      if (dsoIndex < store.dsoObjects.length) {
+        store.clearCluster();
+        this.selectDsoByIndex(dsoIndex);
+      }
+      return;
+    }
+
+    // TLE hit path — existing cluster logic
+    const tleHits = gpuHits.filter((i) => i < this.catalogData.length);
     const geom = this.satelliteRenderer.mesh.geometry;
     const posArr = geom.getAttribute('currentPosition') as THREE.BufferAttribute;
     const sizeArr = geom.getAttribute('size') as THREE.BufferAttribute;
-    const anchorIdx = gpuHits[0];
+    const anchorIdx = tleHits[0];
     const wx = posArr.getX(anchorIdx);
     const wy = posArr.getY(anchorIdx);
     const wz = posArr.getZ(anchorIdx);
 
-    // CPU search: find all satellites within ~50km of the anchor
-    const clusterSet = new Set<number>(gpuHits);
+    const clusterSet = new Set<number>(tleHits);
     const count = this.catalogData.length;
     for (let i = 0; i < count; i++) {
-      if (sizeArr.getX(i) < 0.01) continue; // skip hidden/invalid
+      if (sizeArr.getX(i) < 0.01) continue;
       const px = posArr.getX(i) - wx;
       const py = posArr.getY(i) - wy;
       const pz = posArr.getZ(i) - wz;
@@ -575,7 +655,6 @@ export class Engine {
       }
     }
 
-    // Sort by size descending (most visually prominent first)
     const allIndices = Array.from(clusterSet);
     allIndices.sort((a, b) => sizeArr.getX(b) - sizeArr.getX(a));
 
@@ -585,7 +664,6 @@ export class Engine {
       return;
     }
 
-    // Multiple objects — show disambiguation popup
     const items = allIndices.map((i) => {
       const px = posArr.getX(i);
       const py = posArr.getY(i);
@@ -609,8 +687,6 @@ export class Engine {
 
     const store = useStore.getState();
 
-    // Auto-redirect fly-to on satellite change — start animation directly
-    // (can't use flyToSatellite because its guard would bail after selectedIndex is updated)
     const isTracking = store.cameraMode === 'flying' || store.cameraMode === 'following';
     if (isTracking && store.selectedIndex !== null && store.selectedIndex !== index) {
       store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
@@ -622,7 +698,6 @@ export class Engine {
       return;
     }
 
-    // Clicking a different object while returning exits camera tracking
     if (store.cameraMode !== 'free' && store.selectedIndex !== index) {
       store.setCameraMode('free');
     }
@@ -630,15 +705,25 @@ export class Engine {
     store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
   }
 
+  selectDsoByIndex(dsoIndex: number): void {
+    const store = useStore.getState();
+    const dso = store.dsoObjects[dsoIndex];
+    if (!dso) return;
+
+    if (store.cameraMode !== 'free') {
+      store.setCameraMode('free');
+    }
+
+    store.setSelectedDso(dso);
+  }
+
   flyToSatellite(index: number): void {
     if (index < 0 || index >= this.catalogData.length || !this.firstPositionReceived) return;
 
     const store = useStore.getState();
-    // Already flying/following this satellite — no-op
     if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
       && store.selectedIndex === index) return;
 
-    // Ensure satellite is selected
     if (store.selectedIndex !== index) {
       this.selectByIndex(index);
     }
@@ -646,9 +731,26 @@ export class Engine {
     const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
     const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
 
-    // Start fly animation — subscription handles controls.enabled
     this.arrivalTime = -1;
     this.cameraController.flyTo(satPos, this.controls.target);
+    store.setCameraMode('flying');
+  }
+
+  flyToDso(dsoId: string): void {
+    const store = useStore.getState();
+    const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === dsoId);
+    if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return;
+
+    if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
+      && store.selectedDso?.dsoId === dsoId) return;
+
+    if (store.selectedDso?.dsoId !== dsoId) {
+      store.setSelectedDso(store.dsoObjects[dsoIndex]);
+    }
+
+    const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
+    this.arrivalTime = -1;
+    this.cameraController.flyTo(dsoPos, this.controls.target);
     store.setCameraMode('flying');
   }
 
@@ -658,7 +760,6 @@ export class Engine {
     if (store.cameraMode !== 'returning') {
       store.setCameraMode('returning');
     } else {
-      // Re-trigger if already returning (e.g. from a contextual deselect)
       this.returnEndPos = HOME_POSITION.clone();
       this.returnEndTarget.copy(HOME_TARGET);
       this.cameraController.returnToHome(this.controls.target);
@@ -689,9 +790,6 @@ export class Engine {
     }
   }
 
-  /** OrbitControls 'start' event — reserved for future use.
-   *  Drag exit from following is handled in onPointerMove (controls are disabled
-   *  in following mode so this event won't fire during following). */
   private onControlsStart = (): void => {
     // no-op
   };
@@ -706,6 +804,7 @@ export class Engine {
   };
 
   dispose(): void {
+    stopDsoClient();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }
@@ -716,6 +815,7 @@ export class Engine {
     this.cameraModeUnsub?.();
     this.filterUnsub?.();
     this.trailUnsub?.();
+    this.dsoUnsub?.();
     this.worker?.terminate();
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
@@ -729,6 +829,7 @@ export class Engine {
       this.observerMarker = null;
     }
     this.gpuPicker?.dispose();
+    this.dsoRenderer.dispose();
     this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();

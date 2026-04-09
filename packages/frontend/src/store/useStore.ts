@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
 import type { DsoObject, DsoSnapshot, TrackedObject } from '../data/dso-types';
+import type { DsoLabelPosition } from '../engine/DsoRenderer';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
@@ -30,6 +31,8 @@ interface AppState {
   dsoEphemerisById: Record<string, DsoSnapshot>;
   dsoCount: number;
   selectedDso: DsoObject | null;
+  dsoLabelPositions: DsoLabelPosition[];
+  triggerFlyToDso: ((dsoId: string) => void) | null;
 
   hoveredName: string | null;
   hoverScreenX: number;
@@ -84,6 +87,8 @@ interface AppState {
   setDsoEphemeris: (dsoId: string, snapshot: DsoSnapshot) => void;
   setSelectedDso: (dso: DsoObject | null) => void;
   clearDsoEphemeris: (dsoId: string) => void;
+  setDsoLabelPositions: (positions: DsoLabelPosition[]) => void;
+  setTriggerFlyToDso: (fn: (dsoId: string) => void) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -116,6 +121,8 @@ export const useStore = create<AppState>((set) => ({
   dsoEphemerisById: {},
   dsoCount: 0,
   selectedDso: null,
+  dsoLabelPositions: [],
+  triggerFlyToDso: null,
 
   hoveredName: null,
   hoverScreenX: 0,
@@ -239,6 +246,8 @@ export const useStore = create<AppState>((set) => ({
       delete next[dsoId];
       return { dsoEphemerisById: next };
     }),
+  setDsoLabelPositions: (positions) => set({ dsoLabelPositions: positions }),
+  setTriggerFlyToDso: (fn) => set({ triggerFlyToDso: fn }),
 }));
 
 /** Selector: currently selected object as a TrackedObject, or null. */

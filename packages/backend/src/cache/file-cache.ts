@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import { EnrichedTLEObject, VersionInfo } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
@@ -22,7 +23,9 @@ import { logger } from '../utils/logger.js';
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function getCacheDir(): string {
-  return path.resolve(process.env.CACHE_DIR ?? './data');
+  if (process.env.CACHE_DIR) return path.resolve(process.env.CACHE_DIR);
+  // Anchor to this file's location so the path is stable regardless of cwd
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../data');
 }
 
 function tleCachePath(): string {
