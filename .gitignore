@@ -21,7 +21,8 @@ build/
 packages/backend/data/tle-cache.json
 packages/backend/data/version.json
 # Root level cache (mistakenly added before)
-data/
+packages/backend/data/
+/data/
 # Root level temporary reference files
 PROGRESS.md
 viewing_frame.txt
