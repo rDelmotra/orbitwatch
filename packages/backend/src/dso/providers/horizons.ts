@@ -182,7 +182,7 @@ function parseCsvVectorLine(line: string): ProviderSample {
 
   return {
     julianDayTdb,
-    timestampIsoTdb: toIsoCalendarDateTdb(calendarDateRaw),
+    calendarTimestampTdb: toIsoCalendarDateTdb(calendarDateRaw),
     x,
     y,
     z,

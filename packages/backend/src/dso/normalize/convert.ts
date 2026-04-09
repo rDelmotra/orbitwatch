@@ -26,11 +26,11 @@ function toJulianDayUtc(date: Date): number {
   return date.getTime() / 86400000 + 2440587.5;
 }
 
-function toApproxJulianDayTdb(date: Date): number {
+function toApproxJulianDayTdbFromUtcDate(date: Date): number {
   return toJulianDayUtc(date) + APPROX_TDB_MINUS_UTC_SECONDS / SECONDS_PER_DAY;
 }
 
-function julianDayTdbToIsoUtc(julianDayTdb: number): string {
+function approxJulianDayTdbToIsoUtc(julianDayTdb: number): string {
   const epochMs = (julianDayTdb - 2440587.5) * 86400000;
   return new Date(epochMs - APPROX_TDB_MINUS_UTC_SECONDS * 1000).toISOString();
 }
@@ -370,7 +370,7 @@ function convertSampleToTemeState(sample: ProviderFetchResult['samples'][number]
   ];
 
   return [
-    julianDayTdbToIsoUtc(sample.julianDayTdb),
+    approxJulianDayTdbToIsoUtc(sample.julianDayTdb),
     positionTemeKm[0] / EARTH_RADIUS_KM,
     positionTemeKm[1] / EARTH_RADIUS_KM,
     positionTemeKm[2] / EARTH_RADIUS_KM,
@@ -390,8 +390,8 @@ export function convertProviderFetchToDsoSnapshot(
     throw new DsoNormalizationError(`Provider fetch for ${entry.dsoId} returned no samples`);
   }
 
-  const windowStartJdTdb = toApproxJulianDayTdb(windowStart);
-  const windowEndJdTdb = toApproxJulianDayTdb(windowEnd);
+  const windowStartJdTdb = toApproxJulianDayTdbFromUtcDate(windowStart);
+  const windowEndJdTdb = toApproxJulianDayTdbFromUtcDate(windowEnd);
 
   if (windowEndJdTdb <= windowStartJdTdb) {
     throw new DsoNormalizationError('Normalization window end must be after start');
@@ -431,7 +431,7 @@ export function convertProviderFetchToDsoSnapshot(
     snapshotVersion,
     provider: providerFetch.provider,
     sourceObjectId: providerFetch.providerObjectId,
-    sourceFrame: 'J2000',
+    sourceFrame: providerFetch.sourceFrame,
     frame: 'TEME',
     distanceUnits: 'earth_radii',
     velocityUnits: 'earth_radii_per_second',
@@ -456,8 +456,9 @@ export const __testing__ = {
   computeJ2000ToTemeMatrix,
   computeJ2000ToTemeMatrixDerivative,
   convertSampleToTemeState,
+  convertProviderFetchToDsoSnapshot,
   multiplyMatrixVector,
-  julianDayTdbToIsoUtc,
+  approxJulianDayTdbToIsoUtc,
   EARTH_RADIUS_KM,
   J2000_JULIAN_DAY,
 } as const;

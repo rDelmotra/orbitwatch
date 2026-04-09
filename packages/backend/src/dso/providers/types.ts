@@ -16,7 +16,9 @@ import type { DsoProvider, DsoRegistryEntry } from '../registry/index.js';
 
 export interface ProviderSample {
   julianDayTdb: number;
-  timestampIsoTdb: string;
+  // Human-readable Horizons calendar timestamp in the TDB timescale.
+  // This is intentionally not a machine-parseable UTC ISO timestamp.
+  calendarTimestampTdb: string;
   x: number;
   y: number;
   z: number;

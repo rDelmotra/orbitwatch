@@ -36,6 +36,7 @@ const {
   computeJ2000ToTemeMatrix,
   computeJ2000ToTemeMatrixDerivative,
   convertSampleToTemeState,
+  convertProviderFetchToDsoSnapshot,
   multiplyMatrixVector,
   EARTH_RADIUS_KM,
   J2000_JULIAN_DAY,
@@ -186,7 +187,7 @@ describe('J2000 → TEME frame conversion', () => {
     it('converts J2000 km to TEME earth_radii correctly', () => {
       const sample = {
         julianDayTdb: JD_VALLADO,
-        timestampIsoTdb: '2004-04-06T07:51:28.386',
+        calendarTimestampTdb: '2004-04-06T07:51:28.386',
         x: VALLADO_R_J2000[0],
         y: VALLADO_R_J2000[1],
         z: VALLADO_R_J2000[2],
@@ -220,11 +221,72 @@ describe('J2000 → TEME frame conversion', () => {
     });
   });
 
+  describe('Test Case 5: snapshot shaping', () => {
+
+    it('preserves provider source frame metadata in the published snapshot', () => {
+      const snapshot = convertProviderFetchToDsoSnapshot(
+        {
+          dsoId: 'jwst',
+          slug: 'jwst',
+          displayName: 'James Webb Space Telescope',
+          provider: 'horizons',
+          providerObjectId: '-170',
+          enabled: true,
+          targetBody: 'other',
+          regime: 'OTHER',
+          sampleStepSec: 600,
+          refreshIntervalSec: 21600,
+          validPastWindowSec: 21600,
+          validFutureWindowSec: 259200,
+          mission: 'JWST',
+          description: null,
+          launchDate: null,
+          searchAliases: ['jwst'],
+        },
+        {
+          provider: 'horizons',
+          providerObjectId: '-170',
+          sourceFrame: 'ICRF',
+          sourceUnits: 'KM-S',
+          timeScale: 'TDB',
+          fetchedAt: '2026-04-09T12:00:00.000Z',
+          sourceRevisionAt: null,
+          samples: [
+            {
+              julianDayTdb: JD_VALLADO,
+              calendarTimestampTdb: '2004-04-06T07:51:28.386',
+              x: VALLADO_R_J2000[0],
+              y: VALLADO_R_J2000[1],
+              z: VALLADO_R_J2000[2],
+              vx: VALLADO_V_J2000[0],
+              vy: VALLADO_V_J2000[1],
+              vz: VALLADO_V_J2000[2],
+            },
+            {
+              julianDayTdb: JD_VALLADO + (600 / 86400),
+              calendarTimestampTdb: '2004-04-06T08:01:28.386',
+              x: VALLADO_R_J2000[0] + 1,
+              y: VALLADO_R_J2000[1] + 1,
+              z: VALLADO_R_J2000[2] + 1,
+              vx: VALLADO_V_J2000[0],
+              vy: VALLADO_V_J2000[1],
+              vz: VALLADO_V_J2000[2],
+            },
+          ],
+        },
+        new Date('2004-04-06T07:50:00.000Z'),
+        new Date('2004-04-06T08:05:00.000Z'),
+      );
+
+      assert.equal(snapshot.sourceFrame, 'ICRF');
+    });
+  });
+
   // -------------------------------------------------------------------------
-  // Test Case 5: Precession sub-component checks
+  // Test Case 6: Precession sub-component checks
   // -------------------------------------------------------------------------
 
-  describe('Test Case 5: Precession matrix properties', () => {
+  describe('Test Case 6: Precession matrix properties', () => {
 
     it('precession matrix is orthogonal (R^T R ≈ I)', () => {
       const P = computePrecessionMatrix(JD_VALLADO);
@@ -257,10 +319,10 @@ describe('J2000 → TEME frame conversion', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test Case 6: Nutation sub-component checks
+  // Test Case 7: Nutation sub-component checks
   // -------------------------------------------------------------------------
 
-  describe('Test Case 6: Nutation terms sanity', () => {
+  describe('Test Case 7: Nutation terms sanity', () => {
 
     it('nutation Δψ is in expected range (~±20 arcsec)', () => {
       const terms = computeNutationTerms(JD_VALLADO);
