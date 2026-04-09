@@ -4,7 +4,7 @@ import dsoFragmentShader from '../shaders/dso.frag.glsl?raw';
 import type { DsoObject, DsoSnapshot } from '../data/dso-types';
 import { interpolateDsoPosition } from '../data/dso-interpolator';
 
-const MAX_DSO = 64;
+const INITIAL_DSO_CAPACITY = 64;
 // Base point size passed into the shader (pixels before pixel-ratio scaling)
 const DSO_BASE_SIZE = 5.0;
 
@@ -21,35 +21,23 @@ export class DsoRenderer {
   // Geometry is shared with GPUPicker — same attributes, different material
   readonly geometry: THREE.BufferGeometry;
 
-  private readonly currPosAttr: THREE.BufferAttribute;
-  private readonly prevPosAttr: THREE.BufferAttribute;
-  private readonly sizeAttr: THREE.BufferAttribute;
-  private readonly pickIdAttr: THREE.BufferAttribute;
+  private currPosAttr: THREE.BufferAttribute;
+  private prevPosAttr: THREE.BufferAttribute;
+  private sizeAttr: THREE.BufferAttribute;
+  private pickIdAttr: THREE.BufferAttribute;
 
   private dsoObjects: DsoObject[] = [];
   private tleCount = 0;
   private activeCount = 0;
+  private capacity = 0;
 
   constructor(scene: THREE.Scene) {
-    const positions     = new Float32Array(MAX_DSO * 3);
-    const prevPositions = new Float32Array(MAX_DSO * 3);
-    const sizes         = new Float32Array(MAX_DSO);
-    const pickIds       = new Float32Array(MAX_DSO * 3);
-
     this.geometry = new THREE.BufferGeometry();
-
-    this.currPosAttr = new THREE.BufferAttribute(positions, 3);
-    this.prevPosAttr = new THREE.BufferAttribute(prevPositions, 3);
-    this.sizeAttr    = new THREE.BufferAttribute(sizes, 1);
-    this.pickIdAttr  = new THREE.BufferAttribute(pickIds, 3);
-
-    // 'position' is required by Three.js for bounding-sphere computation
-    this.geometry.setAttribute('position',        this.currPosAttr);
-    this.geometry.setAttribute('currentPosition', this.currPosAttr);
-    this.geometry.setAttribute('previousPosition', this.prevPosAttr);
-    this.geometry.setAttribute('size',    this.sizeAttr);
-    this.geometry.setAttribute('pickId',  this.pickIdAttr);
-    this.geometry.setDrawRange(0, 0);
+    this.currPosAttr = new THREE.BufferAttribute(new Float32Array(0), 3);
+    this.prevPosAttr = new THREE.BufferAttribute(new Float32Array(0), 3);
+    this.sizeAttr = new THREE.BufferAttribute(new Float32Array(0), 1);
+    this.pickIdAttr = new THREE.BufferAttribute(new Float32Array(0), 3);
+    this.allocateAttributes(INITIAL_DSO_CAPACITY);
 
     const material = new THREE.ShaderMaterial({
       vertexShader:   dsoVertexShader,
@@ -69,6 +57,41 @@ export class DsoRenderer {
     scene.add(this.mesh);
   }
 
+  private allocateAttributes(capacity: number): void {
+    this.capacity = capacity;
+
+    const positions = new Float32Array(capacity * 3);
+    const prevPositions = new Float32Array(capacity * 3);
+    const sizes = new Float32Array(capacity);
+    const pickIds = new Float32Array(capacity * 3);
+
+    this.currPosAttr = new THREE.BufferAttribute(positions, 3);
+    this.prevPosAttr = new THREE.BufferAttribute(prevPositions, 3);
+    this.sizeAttr = new THREE.BufferAttribute(sizes, 1);
+    this.pickIdAttr = new THREE.BufferAttribute(pickIds, 3);
+
+    // 'position' is required by Three.js for bounding-sphere computation
+    this.geometry.setAttribute('position', this.currPosAttr);
+    this.geometry.setAttribute('currentPosition', this.currPosAttr);
+    this.geometry.setAttribute('previousPosition', this.prevPosAttr);
+    this.geometry.setAttribute('size', this.sizeAttr);
+    this.geometry.setAttribute('pickId', this.pickIdAttr);
+    this.geometry.setDrawRange(0, Math.min(this.activeCount, capacity));
+  }
+
+  private ensureCapacity(requiredCount: number): void {
+    if (requiredCount <= this.capacity) {
+      return;
+    }
+
+    let nextCapacity = Math.max(this.capacity, INITIAL_DSO_CAPACITY);
+    while (nextCapacity < requiredCount) {
+      nextCapacity *= 2;
+    }
+
+    this.allocateAttributes(nextCapacity);
+  }
+
   get material(): THREE.ShaderMaterial {
     return this.mesh.material as THREE.ShaderMaterial;
   }
@@ -80,14 +103,9 @@ export class DsoRenderer {
   init(dsoObjects: DsoObject[], tleCount: number): void {
     this.dsoObjects = dsoObjects;
     this.tleCount   = tleCount;
+    this.ensureCapacity(dsoObjects.length);
 
-    if (dsoObjects.length > MAX_DSO) {
-      console.warn(
-        `[DsoRenderer] catalog has ${dsoObjects.length} objects but MAX_DSO=${MAX_DSO}; ` +
-        `clamping — increase MAX_DSO to render all`,
-      );
-    }
-    this.activeCount = Math.min(dsoObjects.length, MAX_DSO);
+    this.activeCount = dsoObjects.length;
     this.geometry.setDrawRange(0, this.activeCount);
 
     const pickArr = this.pickIdAttr.array as Float32Array;

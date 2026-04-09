@@ -127,11 +127,9 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
       break;
     case 'UPDATE_SNAPSHOT':
       if (msg.snapshot) {
-        snapshotsById = { ...snapshotsById, [msg.dsoId]: msg.snapshot };
+        snapshotsById[msg.dsoId] = msg.snapshot;
       } else {
-        const next = { ...snapshotsById };
-        delete next[msg.dsoId];
-        snapshotsById = next;
+        delete snapshotsById[msg.dsoId];
       }
       break;
     case 'SET_VALID_TO_GRACE_SEC':

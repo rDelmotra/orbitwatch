@@ -20,6 +20,8 @@ const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
 const DSO_VALID_TO_GRACE_SEC = 600;
 const DSO_TRAIL_POINTS = 360;
+const DSO_WORKER_RESTART_DELAY_MS = 500;
+const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 
 type DsoWorkerInMessage =
   | {
@@ -52,6 +54,10 @@ export class Engine {
   private worker: Worker | null = null;
   private dsoWorker: Worker | null = null;
   private dsoWorkerTickInFlight = false;
+  private dsoWorkerLastTickSentAt = 0;
+  private dsoWorkerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private dsoWorkerKnownIds = new Set<string>();
+  private dsoWorkerKnownSnapshotVersions = new Map<string, string>();
   private propagationInterval: ReturnType<typeof setInterval> | null = null;
   private objectCount = 0;
   private lastTickTime = 0;
@@ -274,7 +280,7 @@ export class Engine {
           prevDsoObjects = state.dsoObjects;
           this.dsoRenderer.init(state.dsoObjects, this.catalogData.length);
           this.gpuPicker?.addDsoGeometry(this.dsoRenderer.geometry, state.dsoObjects.length);
-          this.syncDsoWorkerState();
+          this.syncDsoWorkerIds(state.dsoObjects.map((dso) => dso.dsoId));
           if (state.showOrbitTrail) {
             this.refreshOrbitTrail(state);
           }
@@ -283,8 +289,8 @@ export class Engine {
       let prevDsoEphemeris = useStore.getState().dsoEphemerisById;
       this.dsoEphemerisUnsub = useStore.subscribe((state) => {
         if (state.dsoEphemerisById !== prevDsoEphemeris) {
+          this.syncDsoWorkerEphemerisDiff(prevDsoEphemeris, state.dsoEphemerisById);
           prevDsoEphemeris = state.dsoEphemerisById;
-          this.syncDsoWorkerState();
           if (state.showOrbitTrail && state.selectedDso) {
             this.requestDsoTrail(state.selectedDso.dsoId);
           }
@@ -443,6 +449,9 @@ export class Engine {
   private initDsoWorker(): void {
     this.dsoWorker?.terminate();
     this.dsoWorkerTickInFlight = false;
+    this.dsoWorkerLastTickSentAt = 0;
+    this.dsoWorkerKnownIds.clear();
+    this.dsoWorkerKnownSnapshotVersions.clear();
 
     this.dsoWorker = new Worker(
       new URL('../workers/dso.worker.ts', import.meta.url),
@@ -453,6 +462,7 @@ export class Engine {
       const msg = event.data;
       if (msg.type === 'POSITIONS') {
         this.dsoWorkerTickInFlight = false;
+        this.dsoWorkerLastTickSentAt = 0;
         this.dsoRenderer.updateFromWorkerBuffers(msg.positions, msg.visibleFlags);
         return;
       }
@@ -464,21 +474,114 @@ export class Engine {
       this.orbitTrailRenderer.generateFromPositions(msg.positions);
     };
 
-    this.syncDsoWorkerState();
+    this.dsoWorker.onerror = (event) => {
+      console.error('DSO worker error:', event);
+      this.dsoWorkerTickInFlight = false;
+      this.scheduleDsoWorkerRestart();
+    };
+
+    this.dsoWorker.onmessageerror = (event) => {
+      console.error('DSO worker message error:', event);
+      this.dsoWorkerTickInFlight = false;
+      this.scheduleDsoWorkerRestart();
+    };
+
+    this.bootstrapDsoWorkerState();
   }
 
-  private syncDsoWorkerState(): void {
+  private scheduleDsoWorkerRestart(): void {
+    if (this.dsoWorkerRestartTimer !== null) {
+      return;
+    }
+
+    this.dsoWorkerRestartTimer = setTimeout(() => {
+      this.dsoWorkerRestartTimer = null;
+      this.initDsoWorker();
+    }, DSO_WORKER_RESTART_DELAY_MS);
+  }
+
+  private bootstrapDsoWorkerState(): void {
     if (!this.dsoWorker) {
       return;
     }
 
     const state = useStore.getState();
+    const dsoIds = state.dsoObjects.map((dso) => dso.dsoId);
     this.dsoWorker.postMessage({
       type: 'INIT_SNAPSHOTS',
-      dsoIds: state.dsoObjects.map((dso) => dso.dsoId),
+      dsoIds,
       snapshots: state.dsoEphemerisById,
       validToGraceSec: DSO_VALID_TO_GRACE_SEC,
     } satisfies DsoWorkerInMessage);
+    this.dsoWorker.postMessage({
+      type: 'SET_VALID_TO_GRACE_SEC',
+      validToGraceSec: DSO_VALID_TO_GRACE_SEC,
+    } satisfies DsoWorkerInMessage);
+
+    this.dsoWorkerKnownIds = new Set(dsoIds);
+    this.dsoWorkerKnownSnapshotVersions.clear();
+    for (const [dsoId, snapshot] of Object.entries(state.dsoEphemerisById)) {
+      this.dsoWorkerKnownSnapshotVersions.set(dsoId, snapshot.snapshotVersion);
+    }
+  }
+
+  private syncDsoWorkerIds(nextIds: string[]): void {
+    if (!this.dsoWorker) {
+      return;
+    }
+
+    const sameSize = this.dsoWorkerKnownIds.size === nextIds.length;
+    const sameMembers = sameSize && nextIds.every((id) => this.dsoWorkerKnownIds.has(id));
+    if (!sameMembers) {
+      this.dsoWorker.postMessage({
+        type: 'SET_DSO_IDS',
+        dsoIds: nextIds,
+      } satisfies DsoWorkerInMessage);
+      this.dsoWorkerKnownIds = new Set(nextIds);
+    }
+
+    for (const knownId of Array.from(this.dsoWorkerKnownSnapshotVersions.keys())) {
+      if (!this.dsoWorkerKnownIds.has(knownId)) {
+        this.dsoWorkerKnownSnapshotVersions.delete(knownId);
+      }
+    }
+  }
+
+  private syncDsoWorkerEphemerisDiff(
+    prev: Record<string, DsoSnapshot>,
+    next: Record<string, DsoSnapshot>,
+  ): void {
+    if (!this.dsoWorker) {
+      return;
+    }
+
+    const touchedIds = new Set<string>([
+      ...Object.keys(prev),
+      ...Object.keys(next),
+    ]);
+
+    for (const dsoId of touchedIds) {
+      const prevSnapshot = prev[dsoId];
+      const nextSnapshot = next[dsoId];
+      const prevVersion = prevSnapshot?.snapshotVersion ?? null;
+      const nextVersion = nextSnapshot?.snapshotVersion ?? null;
+
+      if (prevVersion === nextVersion) {
+        continue;
+      }
+
+      this.dsoWorker.postMessage({
+        type: 'UPDATE_SNAPSHOT',
+        dsoId,
+        snapshot: nextSnapshot ?? null,
+      } satisfies DsoWorkerInMessage);
+
+      if (nextSnapshot) {
+        this.dsoWorkerKnownSnapshotVersions.set(dsoId, nextSnapshot.snapshotVersion);
+      } else {
+        this.dsoWorkerKnownSnapshotVersions.delete(dsoId);
+      }
+    }
   }
 
   private requestDsoTrail(dsoId: string): void {
@@ -543,12 +646,22 @@ export class Engine {
 
     // ── DSO position update (worker-driven) ───────────────────────────────────
     const store = useStore.getState();
+    if (
+      this.dsoWorker &&
+      this.dsoWorkerTickInFlight &&
+      performance.now() - this.dsoWorkerLastTickSentAt > DSO_WORKER_STALL_TIMEOUT_MS
+    ) {
+      console.warn('DSO worker tick timed out; restarting worker');
+      this.dsoWorkerTickInFlight = false;
+      this.scheduleDsoWorkerRestart();
+    }
     if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
       this.dsoWorker.postMessage({
         type: 'TICK',
         timestamp: Date.now(),
       } satisfies DsoWorkerInMessage);
       this.dsoWorkerTickInFlight = true;
+      this.dsoWorkerLastTickSentAt = performance.now();
     }
     this.dsoRenderer.updateUniforms(this.renderer.getPixelRatio());
 
@@ -947,6 +1060,13 @@ export class Engine {
     this.worker?.terminate();
     this.dsoWorker?.terminate();
     this.dsoWorkerTickInFlight = false;
+    this.dsoWorkerLastTickSentAt = 0;
+    this.dsoWorkerKnownIds.clear();
+    this.dsoWorkerKnownSnapshotVersions.clear();
+    if (this.dsoWorkerRestartTimer !== null) {
+      clearTimeout(this.dsoWorkerRestartTimer);
+      this.dsoWorkerRestartTimer = null;
+    }
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);

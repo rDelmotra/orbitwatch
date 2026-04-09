@@ -22,19 +22,21 @@ import {
 } from '../registry/index.js';
 import { getDsoProviderAdapter } from '../providers/index.js';
 import {
+  getUnavailableRetryDelayMs,
+  shouldRefreshDsoEntry,
+} from './retry-policy.js';
+import {
   publishDsoFailureState,
   publishDsoSnapshot,
   publishDsoWorkerHeartbeat,
   readDsoManifest,
   type DsoManifest,
-  type DsoObjectStatus,
 } from '../snapshot/index.js';
 import { logger } from '../../utils/logger.js';
 
 const FALLBACK_LOOP_INTERVAL_MS = 60_000;
 const LOOP_JITTER_RATIO = 0.1;
 const MIN_LOOP_INTERVAL_MS = 1_000;
-const UNAVAILABLE_RETRY_DELAY_MS = 60_000;
 
 export interface DsoWorkerLoopOptions {
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
@@ -44,13 +46,6 @@ export interface DsoWorkerLoopOptions {
 export interface DsoWorkerControls {
   stop: () => void;
   run: Promise<void>;
-}
-
-function parseIsoTimestamp(value: string | null): number {
-  if (!value) {
-    return Number.NaN;
-  }
-  return Date.parse(value);
 }
 
 function computeWindow(entry: DsoRegistryEntry, now: Date): { windowStart: Date; windowEnd: Date } {
@@ -69,59 +64,47 @@ function computeWindow(entry: DsoRegistryEntry, now: Date): { windowStart: Date;
   };
 }
 
-export function shouldRefreshDsoEntry(
-  entry: DsoRegistryEntry,
-  status: DsoObjectStatus | null | undefined,
-  now: Date = new Date(),
-): boolean {
-  if (!entry.enabled) {
-    return false;
-  }
-
-  if (!status?.currentSnapshotVersion || !status.lastSuccessAt) {
-    return true;
-  }
-
-  const nowMs = now.getTime();
-  const lastSuccessMs = parseIsoTimestamp(status.lastSuccessAt);
-  const validToMs = parseIsoTimestamp(status.validTo);
-  const refreshIntervalMs = entry.refreshIntervalSec * 1000;
-
-  if (!Number.isFinite(lastSuccessMs)) {
-    return true;
-  }
-
-  if (nowMs - lastSuccessMs >= refreshIntervalMs) {
-    return true;
-  }
-
-  if (!Number.isFinite(validToMs)) {
-    return true;
-  }
-
-  return validToMs - nowMs <= refreshIntervalMs;
-}
-
-function hasUnavailableFailedEntries(
+function computeNextUnavailableRetryDelayMs(
   entries: readonly DsoRegistryEntry[],
   manifest: DsoManifest | null,
-): boolean {
+  now: Date,
+): number | null {
   if (!manifest) {
-    return false;
+    return null;
   }
 
-  return entries.some((entry) => {
+  let minDelayMs = Number.POSITIVE_INFINITY;
+
+  for (const entry of entries) {
     const status = manifest.objects[entry.dsoId];
-    return Boolean(status?.lastFailureAt && !status.currentSnapshotVersion);
-  });
+    if (!status?.lastFailureAt || status.currentSnapshotVersion) {
+      continue;
+    }
+
+    const unavailableRetryDelayMs = getUnavailableRetryDelayMs(status, now);
+    if (unavailableRetryDelayMs === null) {
+      continue;
+    }
+    if (!Number.isFinite(unavailableRetryDelayMs)) {
+      minDelayMs = Math.min(minDelayMs, MIN_LOOP_INTERVAL_MS);
+      continue;
+    }
+
+    const delayMs = Math.max(MIN_LOOP_INTERVAL_MS, unavailableRetryDelayMs);
+    minDelayMs = Math.min(minDelayMs, delayMs);
+  }
+
+  return Number.isFinite(minDelayMs) ? minDelayMs : null;
 }
 
 function computeLoopDelayMs(
   entries: readonly DsoRegistryEntry[],
   manifest: DsoManifest | null,
+  now: Date = new Date(),
 ): number {
-  if (hasUnavailableFailedEntries(entries, manifest)) {
-    return UNAVAILABLE_RETRY_DELAY_MS;
+  const unavailableRetryDelayMs = computeNextUnavailableRetryDelayMs(entries, manifest, now);
+  if (unavailableRetryDelayMs !== null) {
+    return unavailableRetryDelayMs;
   }
 
   const shortestRefreshMs = entries.reduce<number>(
@@ -229,7 +212,7 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
       }
 
       const activeEntries = getEnabledDsoRegistryEntries();
-      const delayMs = computeLoopDelayMs(activeEntries, latestManifest);
+      const delayMs = computeLoopDelayMs(activeEntries, latestManifest, new Date());
       logger.info(`DSO worker sleeping for ${delayMs}ms before next reconcile`);
 
       try {
@@ -253,3 +236,5 @@ export function startDsoWorkerLoop(options: DsoWorkerLoopOptions = {}): DsoWorke
     run,
   };
 }
+
+export { shouldRefreshDsoEntry } from './retry-policy.js';
