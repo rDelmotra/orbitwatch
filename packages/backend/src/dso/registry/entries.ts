@@ -18,7 +18,7 @@ import type { DsoId, DsoRegistryEntry } from './types.js';
 const DEFAULT_SAMPLE_STEP_SEC = 600;
 const DEFAULT_REFRESH_INTERVAL_SEC = 21_600;
 const DEFAULT_VALID_PAST_WINDOW_SEC = 864_000; // 10 days
-const DEFAULT_VALID_FUTURE_WINDOW_SEC = 259_200; // 3 days
+const DEFAULT_VALID_FUTURE_WINDOW_SEC = 7200; // 3 days
 
 function createRegistryEntry(
   entry: Omit<
@@ -89,7 +89,7 @@ export const DSO_REGISTRY = [
     regime: 'LUNAR',
     mission: 'Artemis II',
     description: 'First crewed mission of NASA’s Artemis program, planned to fly astronauts around the Moon and return to Earth.',
-    launchDate: '2026-04-04', // Updated expected timeframe (subject to change)
+    launchDate: '2026-04-03', // Updated expected timeframe (subject to change)
     searchAliases: ['artemis', 'artemis ii', 'artemis 2', 'nasa artemis ii'],
   }),
   createRegistryEntry({
