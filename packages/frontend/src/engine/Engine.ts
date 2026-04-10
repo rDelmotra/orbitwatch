@@ -27,6 +27,8 @@ const DSO_TRAIL_POINTS = 360;
 const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const VISUAL_CAMERA_SURFACE_OFFSET_ER = 0.015;
+const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 type DsoWorkerInMessage =
   | {
@@ -333,6 +335,8 @@ export class Engine {
           state.observerLocation !== prevObsLoc
         ) {
           const obsLocChanged = state.observerLocation !== prevObsLoc;
+          const modeChanged = state.visibilityMode !== prevVisMode;
+          const prevMode = prevVisMode;
           prevCatFilters = state.categoryFilters;
           prevRegFilters = state.regimeFilters;
           prevVisMode = state.visibilityMode;
@@ -342,6 +346,16 @@ export class Engine {
 
           if (obsLocChanged) {
             this.updateObserverMarker(state.observerLocation);
+          }
+
+          if (
+            state.visibilityMode === 'visual' &&
+            state.observerLocation &&
+            (modeChanged || obsLocChanged)
+          ) {
+            this.focusCameraOnObserverSky(state.observerLocation);
+          } else if (modeChanged && prevMode === 'visual' && state.visibilityMode !== 'visual') {
+            this.resetCamera();
           }
         }
       });
@@ -478,6 +492,32 @@ export class Engine {
         useStore.getState().setSelectedSatellite(null, null);
       }
     }
+  }
+
+  private focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
+    const observerPos = getObserverScenePosition(
+      loc.lat,
+      loc.lon,
+      loc.alt,
+      new Date(),
+    );
+    const upDir = observerPos.clone().normalize();
+    const camPos = observerPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
+    const lookTarget = observerPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
+
+    const store = useStore.getState();
+    if (store.cameraMode !== 'free') {
+      store.setCameraMode('free');
+    }
+
+    this.cameraController.cancel();
+    this.arrivalTime = -1;
+    this.returnEndPos = null;
+    this.controls.enabled = true;
+    this.camera.position.copy(camPos);
+    this.controls.target.copy(lookTarget);
+    this.camera.lookAt(lookTarget);
+    this.controls.update();
   }
 
   private applyVisualListResult(result: VisualListResolvedResult): void {
