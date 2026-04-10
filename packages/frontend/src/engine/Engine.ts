@@ -5,6 +5,10 @@ import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import {
+  type PassPredictionWorkerRequest,
+  type PassPredictionWorkerResponse,
+} from '../orbital/passPrediction';
+import {
   fetchVisualList,
   reconcileVisibilityModeForVisualStatus,
   type VisualListResolvedResult,
@@ -27,6 +31,7 @@ const DSO_TRAIL_POINTS = 360;
 const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const PASS_PREDICTION_REFRESH_INTERVAL_MS = 30_000;
 const VISUAL_CAMERA_SURFACE_OFFSET_ER = 0.003;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
@@ -60,6 +65,7 @@ export class Engine {
   private dsoRenderer: DsoRenderer;
   private worker: Worker | null = null;
   private dsoWorker: Worker | null = null;
+  private passPredictionWorker: Worker | null = null;
   private dsoWorkerTickInFlight = false;
   private dsoWorkerLastTickSentAt = 0;
   private dsoWorkerRestartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,6 +97,11 @@ export class Engine {
   private visualListEtag: string | null = null;
   private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private visualRefreshInFlight = false;
+  private visualPassRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  private visualPassRequestId = 0;
+  private visualPassTrailTeme: Float32Array | null = null;
+  private visualPassTrailNoradId: number | null = null;
+  private visualPassUnsub: (() => void) | null = null;
   private observerMarker: THREE.Group | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -223,6 +234,17 @@ export class Engine {
         updatedAt: null,
         message: null,
       });
+      store.setVisualPassState({
+        status: 'idle',
+        noradId: null,
+        generatedAtMs: null,
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: null,
+      });
       this.startVisualRefreshLoop(apiUrl);
       // Keep visual list refresh non-blocking for TLE bootstrap.
       void this.refreshVisualList(apiUrl);
@@ -289,6 +311,8 @@ export class Engine {
       }
 
       this.initDsoWorker();
+      this.initPassPredictionWorker();
+      this.startVisualPassRefreshLoop();
 
       // ── DSO catalog subscription ────────────────────────────────────────────
       // Re-init DSO renderer whenever dsoObjects changes in the store.
@@ -357,6 +381,10 @@ export class Engine {
           } else if (modeChanged && prevMode === 'visual' && state.visibilityMode !== 'visual') {
             this.resetCamera();
           }
+
+          if (state.showOrbitTrail && (modeChanged || obsLocChanged)) {
+            this.refreshOrbitTrail(state);
+          }
         }
       });
 
@@ -381,6 +409,29 @@ export class Engine {
 
         this.refreshOrbitTrail(state);
       });
+
+      let prevPassSelectedIndex = useStore.getState().selectedIndex;
+      let prevPassObsLoc = useStore.getState().observerLocation;
+      let prevPassMode = useStore.getState().visibilityMode;
+      let prevPassVisualStatus = useStore.getState().visualList.status;
+      this.visualPassUnsub = useStore.subscribe((state) => {
+        const changed =
+          state.selectedIndex !== prevPassSelectedIndex
+          || state.observerLocation !== prevPassObsLoc
+          || state.visibilityMode !== prevPassMode
+          || state.visualList.status !== prevPassVisualStatus;
+        if (!changed) {
+          return;
+        }
+
+        prevPassSelectedIndex = state.selectedIndex;
+        prevPassObsLoc = state.observerLocation;
+        prevPassMode = state.visibilityMode;
+        prevPassVisualStatus = state.visualList.status;
+
+        this.requestVisualPassPrediction(state);
+      });
+      this.requestVisualPassPrediction(useStore.getState());
 
       console.log(`Loaded ${tles.length} TLEs from backend`);
       useStore.getState().setLoadingPhase('initializing');
@@ -449,6 +500,271 @@ export class Engine {
     this.visualRefreshInterval = setInterval(() => {
       void this.refreshVisualList(apiUrl);
     }, VISUAL_REFRESH_INTERVAL_MS);
+  }
+
+  private startVisualPassRefreshLoop(): void {
+    if (this.visualPassRefreshInterval !== null) {
+      clearInterval(this.visualPassRefreshInterval);
+    }
+
+    this.visualPassRefreshInterval = setInterval(() => {
+      this.requestVisualPassPrediction(useStore.getState());
+    }, PASS_PREDICTION_REFRESH_INTERVAL_MS);
+  }
+
+  private initPassPredictionWorker(): void {
+    this.passPredictionWorker?.terminate();
+    this.passPredictionWorker = new Worker(
+      new URL('../workers/passPrediction.worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+
+    this.passPredictionWorker.onmessage = (event: MessageEvent<PassPredictionWorkerResponse>) => {
+      const msg = event.data;
+      if (msg.requestId !== this.visualPassRequestId) {
+        return;
+      }
+
+      const state = useStore.getState();
+      const selectedIndex = state.selectedIndex;
+      if (selectedIndex === null || selectedIndex < 0 || selectedIndex >= this.catalogData.length) {
+        return;
+      }
+
+      const selected = this.catalogData[selectedIndex];
+      if (selected.noradId !== msg.noradId) {
+        return;
+      }
+
+      if (msg.type === 'ERROR') {
+        this.visualPassTrailNoradId = null;
+        this.visualPassTrailTeme = null;
+        state.setVisualPassState({
+          status: 'unavailable',
+          noradId: msg.noradId,
+          generatedAtMs: Date.now(),
+          aosTimeMs: null,
+          tcaTimeMs: null,
+          losTimeMs: null,
+          maxElevationDeg: null,
+          durationMs: null,
+          message: msg.message,
+        });
+        if (state.showOrbitTrail) {
+          this.refreshOrbitTrail(state);
+        }
+        return;
+      }
+
+      if (msg.result.kind === 'no_pass') {
+        this.visualPassTrailNoradId = null;
+        this.visualPassTrailTeme = null;
+        state.setVisualPassState({
+          status: 'no_pass',
+          noradId: msg.noradId,
+          generatedAtMs: Date.now(),
+          aosTimeMs: null,
+          tcaTimeMs: null,
+          losTimeMs: null,
+          maxElevationDeg: null,
+          durationMs: null,
+          message: msg.result.message,
+        });
+        if (state.showOrbitTrail) {
+          this.refreshOrbitTrail(state);
+        }
+        return;
+      }
+
+      const prediction = msg.result.prediction;
+      this.visualPassTrailNoradId = msg.noradId;
+      this.visualPassTrailTeme = prediction.trailPositionsTeme.length >= 6
+        ? prediction.trailPositionsTeme
+        : null;
+      state.setVisualPassState({
+        status: 'ready',
+        noradId: msg.noradId,
+        generatedAtMs: prediction.generatedAtMs,
+        aosTimeMs: prediction.window.aosTimeMs,
+        tcaTimeMs: prediction.window.tcaTimeMs,
+        losTimeMs: prediction.window.losTimeMs,
+        maxElevationDeg: prediction.window.maxElevationDeg,
+        durationMs: prediction.window.durationMs,
+        message: null,
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+    };
+
+    this.passPredictionWorker.onerror = (event) => {
+      console.error('Pass prediction worker error:', event);
+      useStore.getState().setVisualPassState({
+        status: 'unavailable',
+        noradId: null,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Pass prediction worker error.',
+      });
+    };
+  }
+
+  private requestVisualPassPrediction(
+    state: ReturnType<typeof useStore.getState> = useStore.getState(),
+  ): void {
+    const requestId = this.visualPassRequestId + 1;
+    this.visualPassRequestId = requestId;
+
+    const selectedIndex = state.selectedIndex;
+    if (
+      state.visibilityMode !== 'visual'
+      || selectedIndex === null
+      || selectedIndex < 0
+      || selectedIndex >= this.catalogData.length
+    ) {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'idle',
+        noradId: null,
+        generatedAtMs: null,
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: null,
+      });
+      return;
+    }
+
+    const selected = this.catalogData[selectedIndex];
+    if (!state.observerLocation) {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'unavailable',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Observer location is required for pass prediction.',
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+      return;
+    }
+
+    if (state.visualList.status === 'unavailable') {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'unavailable',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Curated VISUAL list is unavailable.',
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+      return;
+    }
+
+    if (state.visualList.status === 'loading') {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'computing',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Loading curated VISUAL list.',
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+      return;
+    }
+
+    if (!this.visualNoradIds.has(selected.noradId)) {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'unavailable',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Selected object is not in curated naked-eye candidates.',
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+      return;
+    }
+
+    if (!this.passPredictionWorker) {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'unavailable',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: 'Pass prediction worker is not available.',
+      });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
+      return;
+    }
+
+    state.setVisualPassState({
+      status: 'computing',
+      noradId: selected.noradId,
+      generatedAtMs: Date.now(),
+      aosTimeMs: null,
+      tcaTimeMs: null,
+      losTimeMs: null,
+      maxElevationDeg: null,
+      durationMs: null,
+      message: null,
+    });
+
+    const request: PassPredictionWorkerRequest = {
+      type: 'PREDICT',
+      requestId,
+      noradId: selected.noradId,
+      line1: selected.line1,
+      line2: selected.line2,
+      observer: state.observerLocation,
+      nowMs: Date.now(),
+    };
+    this.passPredictionWorker.postMessage(request);
   }
 
   private getObserverScenePositionForState(
@@ -555,6 +871,7 @@ export class Engine {
     }
 
     this.recomputeVisibleCounts(useStore.getState());
+    this.requestVisualPassPrediction(useStore.getState());
   }
 
   private async refreshVisualList(apiUrl: string): Promise<void> {
@@ -754,6 +1071,22 @@ export class Engine {
     const selectedIndex = state.selectedIndex;
     if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
       const sat = this.catalogData[selectedIndex];
+      const usePredictedVisualTrail = state.visibilityMode === 'visual' && state.observerLocation !== null;
+      if (usePredictedVisualTrail) {
+        const trail = this.visualPassTrailTeme;
+        const hasReadyTrail = state.visualPass.status === 'ready'
+          && state.visualPass.noradId === sat.noradId
+          && this.visualPassTrailNoradId === sat.noradId
+          && trail !== null
+          && trail.length >= 6;
+        if (hasReadyTrail && trail) {
+          this.orbitTrailRenderer.generateFromPositions(trail);
+        } else {
+          this.orbitTrailRenderer.clear();
+        }
+        return;
+      }
+
       this.orbitTrailRenderer.generate(sat.line1, sat.line2);
       return;
     }
@@ -1249,14 +1582,20 @@ export class Engine {
       clearInterval(this.visualRefreshInterval);
       this.visualRefreshInterval = null;
     }
+    if (this.visualPassRefreshInterval !== null) {
+      clearInterval(this.visualPassRefreshInterval);
+      this.visualPassRefreshInterval = null;
+    }
     this.controls.removeEventListener('start', this.onControlsStart);
     this.cameraModeUnsub?.();
     this.filterUnsub?.();
     this.trailUnsub?.();
+    this.visualPassUnsub?.();
     this.dsoUnsub?.();
     this.dsoEphemerisUnsub?.();
     this.worker?.terminate();
     this.dsoWorker?.terminate();
+    this.passPredictionWorker?.terminate();
     this.dsoWorkerTickInFlight = false;
     this.dsoWorkerLastTickSentAt = 0;
     this.dsoWorkerKnownIds.clear();

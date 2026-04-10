@@ -18,6 +18,20 @@ export interface VisualListState {
   message: string | null;
 }
 
+export type VisualPassStatus = 'idle' | 'computing' | 'ready' | 'no_pass' | 'unavailable';
+
+export interface VisualPassState {
+  status: VisualPassStatus;
+  noradId: number | null;
+  generatedAtMs: number | null;
+  aosTimeMs: number | null;
+  tcaTimeMs: number | null;
+  losTimeMs: number | null;
+  maxElevationDeg: number | null;
+  durationMs: number | null;
+  message: string | null;
+}
+
 interface AppState {
   loadingPhase: LoadingPhase;
   loadingError: string | null;
@@ -56,6 +70,7 @@ interface AppState {
   observerLocation: { lat: number; lon: number; alt: number } | null;
   visibilityMode: VisibilityMode;
   visualList: VisualListState;
+  visualPass: VisualPassState;
 
   categoryFilters: Record<ObjectCategory, boolean>;
   regimeFilters: Record<OrbitalRegime, boolean>;
@@ -94,6 +109,7 @@ interface AppState {
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
   setVisualListState: (state: VisualListState) => void;
+  setVisualPassState: (state: VisualPassState) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -154,6 +170,17 @@ export const useStore = create<AppState>((set) => ({
     stale: false,
     count: 0,
     updatedAt: null,
+    message: null,
+  },
+  visualPass: {
+    status: 'idle',
+    noradId: null,
+    generatedAtMs: null,
+    aosTimeMs: null,
+    tcaTimeMs: null,
+    losTimeMs: null,
+    maxElevationDeg: null,
+    durationMs: null,
     message: null,
   },
 
@@ -246,6 +273,7 @@ export const useStore = create<AppState>((set) => ({
       return { visibilityMode: mode };
     }),
   setVisualListState: (visualList) => set({ visualList }),
+  setVisualPassState: (visualPass) => set({ visualPass }),
 
   setDsoObjects: (objects) =>
     set((state) => ({
