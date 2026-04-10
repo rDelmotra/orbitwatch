@@ -1,8 +1,57 @@
 import { Router, Request, Response } from 'express';
-import { readCache, readVersion } from '../cache/file-cache.js';
+import {
+  isVisualCacheFresh,
+  readCache,
+  readVersion,
+  readVisualCache,
+  writeVisualCache,
+} from '../cache/file-cache.js';
+import type { VisualNoradCache } from '../cache/file-cache.js';
+import { fetchCelesTrakVisualNoradIds } from '../services/celestrak-visual.js';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
+let visualRefreshInFlight: Promise<VisualNoradCache> | null = null;
+
+async function refreshVisualCache(): Promise<VisualNoradCache> {
+  if (!visualRefreshInFlight) {
+    visualRefreshInFlight = (async () => {
+      const ids = await fetchCelesTrakVisualNoradIds();
+      return writeVisualCache(ids);
+    })().finally(() => {
+      visualRefreshInFlight = null;
+    });
+  }
+
+  return visualRefreshInFlight;
+}
+
+function sendVisualResponse(
+  req: Request,
+  res: Response,
+  payload: VisualNoradCache,
+  source: 'celestrak' | 'cache',
+  stale: boolean,
+): void {
+  const etag = `"${payload.version}"`;
+  if (req.headers['if-none-match'] === etag) {
+    res.status(304).end();
+    return;
+  }
+
+  res.setHeader('Cache-Control', stale ? 'public, max-age=300' : 'public, max-age=3600');
+  res.setHeader('ETag', etag);
+  if (stale) {
+    res.setHeader('X-Data-Stale', '1');
+  }
+  res.json({
+    version: payload.version,
+    count: payload.ids.length,
+    ids: payload.ids,
+    source,
+    stale,
+  });
+}
 
 // ============================================================
 // GET /api/tle/all
@@ -43,6 +92,38 @@ router.get('/all', (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.setHeader('ETag', etag);
   res.json({ version: version.version, count: data.length, data });
+});
+
+// ============================================================
+// GET /api/tle/visual
+//
+// Returns the CelesTrak "visual" group as NORAD IDs. This endpoint serves
+// from a local cache when available and refreshes from CelesTrak when stale.
+// On upstream failure, stale cache is served rather than failing hard.
+// ============================================================
+router.get('/visual', async (req: Request, res: Response) => {
+  const cached = readVisualCache();
+  if (cached && isVisualCacheFresh()) {
+    sendVisualResponse(req, res, cached, 'cache', false);
+    return;
+  }
+
+  try {
+    const fresh = await refreshVisualCache();
+    sendVisualResponse(req, res, fresh, 'celestrak', false);
+    return;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'unknown error';
+    if (cached) {
+      logger.warn(`GET /api/tle/visual: serving stale cache after fetch failure: ${message}`);
+      sendVisualResponse(req, res, cached, 'cache', true);
+      return;
+    }
+
+    logger.error(`GET /api/tle/visual: upstream fetch failed and no cache exists: ${message}`);
+    res.status(503).json({ error: 'Visual list unavailable. Try again shortly.' });
+    return;
+  }
 });
 
 // ============================================================

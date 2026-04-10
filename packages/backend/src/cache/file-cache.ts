@@ -21,6 +21,12 @@ import { logger } from '../utils/logger.js';
 // ============================================================
 
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+export const VISUAL_CACHE_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+export interface VisualNoradCache {
+  version: string;
+  ids: number[];
+}
 
 function getCacheDir(): string {
   if (process.env.CACHE_DIR) return path.resolve(process.env.CACHE_DIR);
@@ -36,9 +42,23 @@ function versionPath(): string {
   return path.join(getCacheDir(), 'version.json');
 }
 
+function visualCachePath(): string {
+  return path.join(getCacheDir(), 'visual-cache.json');
+}
+
 /** Ensure the cache directory exists. */
 function ensureCacheDir(): void {
   fs.mkdirSync(getCacheDir(), { recursive: true });
+}
+
+function normalizeNoradIds(values: unknown[]): number[] {
+  const ids = new Set<number>();
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+      ids.add(value);
+    }
+  }
+  return Array.from(ids).sort((a, b) => a - b);
 }
 
 // ============================================================
@@ -83,6 +103,45 @@ export function readVersion(): VersionInfo | null {
   }
 }
 
+/** Returns true if visual-cache.json exists and was written within VISUAL_CACHE_TTL_MS. */
+export function isVisualCacheFresh(): boolean {
+  const p = visualCachePath();
+  if (!fs.existsSync(p)) return false;
+  const mtime = fs.statSync(p).mtimeMs;
+  return Date.now() - mtime < VISUAL_CACHE_TTL_MS;
+}
+
+/**
+ * Read the cached visual NORAD list from disk.
+ * Returns null if missing, unreadable, or structurally invalid.
+ */
+export function readVisualCache(): VisualNoradCache | null {
+  const p = visualCachePath();
+  if (!fs.existsSync(p)) return null;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<VisualNoradCache>;
+    if (typeof parsed.version !== 'string' || !Array.isArray(parsed.ids)) {
+      logger.warn('Visual cache has invalid shape; ignoring it');
+      return null;
+    }
+
+    const ids = normalizeNoradIds(parsed.ids);
+    if (ids.length === 0) {
+      logger.warn('Visual cache is empty or invalid; ignoring it');
+      return null;
+    }
+
+    return {
+      version: parsed.version,
+      ids,
+    };
+  } catch (err) {
+    logger.error('Failed to read visual cache:', err);
+    return null;
+  }
+}
+
 // ============================================================
 // Write helpers
 // ============================================================
@@ -113,4 +172,22 @@ export function writeCache(data: EnrichedTLEObject[]): void {
   logger.info(
     `Cache written: ${data.length} objects, ${(byteSize / 1_048_576).toFixed(1)} MB, version=${version}`,
   );
+}
+
+/** Atomically write the visual NORAD list cache to disk. */
+export function writeVisualCache(ids: number[]): VisualNoradCache {
+  ensureCacheDir();
+
+  const payload: VisualNoradCache = {
+    version: new Date().toISOString(),
+    ids: normalizeNoradIds(ids),
+  };
+
+  const p = visualCachePath();
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
+  fs.renameSync(tmp, p);
+
+  logger.info(`Visual cache written: ${payload.ids.length} NORAD IDs, version=${payload.version}`);
+  return payload;
 }

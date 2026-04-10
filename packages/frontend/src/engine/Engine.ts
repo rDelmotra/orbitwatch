@@ -204,11 +204,12 @@ export class Engine {
     try {
       store.setLoadingPhase('fetching');
       const apiUrl = import.meta.env.VITE_API_URL ?? '';
-      const [res, visualIds] = await Promise.all([
-        fetch(`${apiUrl}/api/tle/all`),
-        fetchVisualNoradIds(),
-      ]);
-      this.visualNoradIds = visualIds;
+      // Visual list is optional: keep TLE bootstrap fast even if this request fails.
+      void fetchVisualNoradIds(apiUrl).then((visualIds) => {
+        this.visualNoradIds = visualIds;
+      });
+
+      const res = await fetch(`${apiUrl}/api/tle/all`);
       if (!res.ok) throw new Error(`TLE fetch failed: ${res.status}`);
 
       const response = await res.json();
