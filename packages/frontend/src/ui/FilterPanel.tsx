@@ -98,6 +98,103 @@ const countStyle: React.CSSProperties = {
   paddingLeft: 8,
 };
 
+const OBSERVER_LOCATION_CACHE_KEY = 'orbitwatch:observerLocation:v1';
+const LOCATION_RETRY_MAX_AGE_MS = 30 * 60 * 1000;
+
+interface ObserverLocationValue {
+  lat: number;
+  lon: number;
+  alt: number;
+}
+
+interface ObserverLocationCacheEnvelope extends ObserverLocationValue {
+  savedAt: number;
+}
+
+function geolocateOnce(options: PositionOptions): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, options);
+  });
+}
+
+function toObserverLocation(position: GeolocationPosition): ObserverLocationValue {
+  const altitudeMeters = position.coords.altitude;
+  const altitudeKm =
+    typeof altitudeMeters === 'number' && Number.isFinite(altitudeMeters)
+      ? altitudeMeters / 1000
+      : 0;
+  return {
+    lat: position.coords.latitude,
+    lon: position.coords.longitude,
+    alt: altitudeKm,
+  };
+}
+
+function cacheObserverLocation(location: ObserverLocationValue): void {
+  if (typeof localStorage === 'undefined') {
+    return;
+  }
+
+  try {
+    const payload: ObserverLocationCacheEnvelope = {
+      ...location,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(OBSERVER_LOCATION_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore local cache write errors.
+  }
+}
+
+function readCachedObserverLocation(): ObserverLocationCacheEnvelope | null {
+  if (typeof localStorage === 'undefined') {
+    return null;
+  }
+
+  try {
+    const raw = localStorage.getItem(OBSERVER_LOCATION_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<ObserverLocationCacheEnvelope>;
+    if (
+      typeof parsed.lat !== 'number'
+      || typeof parsed.lon !== 'number'
+      || typeof parsed.alt !== 'number'
+      || typeof parsed.savedAt !== 'number'
+      || !Number.isFinite(parsed.lat)
+      || !Number.isFinite(parsed.lon)
+      || !Number.isFinite(parsed.alt)
+      || !Number.isFinite(parsed.savedAt)
+    ) {
+      return null;
+    }
+
+    return {
+      lat: parsed.lat,
+      lon: parsed.lon,
+      alt: parsed.alt,
+      savedAt: parsed.savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getLocationErrorMessage(err: GeolocationPositionError): string {
+  switch (err.code) {
+    case 1:
+      return 'Location permission denied. Enable browser + system location permissions.';
+    case 2:
+      return 'Live location unavailable (CoreLocation could not resolve position). Try again in a few seconds or move to an open-sky area.';
+    case 3:
+      return 'Location request timed out. Try again.';
+    default:
+      return `Unable to retrieve location: ${err.message}`;
+  }
+}
+
 export function FilterPanel() {
   const loadingPhase = useStore((s) => s.loadingPhase);
   const categoryFilters = useStore((s) => s.categoryFilters);
@@ -115,6 +212,8 @@ export function FilterPanel() {
   const visualList = useStore((s) => s.visualList);
 
   const [open, setOpen] = useState(true);
+  const [isLocating, setIsLocating] = useState(false);
+  const [locationStatusMessage, setLocationStatusMessage] = useState<string | null>(null);
 
   if (loadingPhase !== 'ready') return null;
 
@@ -137,22 +236,63 @@ export function FilterPanel() {
         ? 'VISUAL list: Loading'
         : 'VISUAL list: Unavailable';
 
-  const handleRequestLocation = () => {
-    if (!navigator.geolocation) {
-      alert("Geolocation is not supported by your browser");
+  const handleRequestLocation = async () => {
+    if (isLocating) {
       return;
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        // Convert altitude from meters to KM if available, otherwise assume roughly 0
-        const altKm = pos.coords.altitude ? pos.coords.altitude / 1000 : 0.0;
-        setObserverLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, alt: altKm });
-        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
-      },
-      (err) => {
-        alert(`Unable to retrieve location: ${err.message}`);
+
+    if (!navigator.geolocation) {
+      setLocationStatusMessage('Geolocation is not supported by your browser.');
+      return;
+    }
+
+    setIsLocating(true);
+    setLocationStatusMessage(null);
+    try {
+      let position: GeolocationPosition;
+      try {
+        position = await geolocateOnce({
+          enableHighAccuracy: true,
+          timeout: 12_000,
+          maximumAge: 0,
+        });
+      } catch (err) {
+        const geoErr = err as GeolocationPositionError;
+        if (geoErr.code === 1) {
+          throw geoErr;
+        }
+
+        position = await geolocateOnce({
+          enableHighAccuracy: false,
+          timeout: 15_000,
+          maximumAge: LOCATION_RETRY_MAX_AGE_MS,
+        });
       }
-    );
+
+      const location = toObserverLocation(position);
+      cacheObserverLocation(location);
+      setObserverLocation(location);
+      setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
+      setLocationStatusMessage(null);
+    } catch (err) {
+      const cached = readCachedObserverLocation();
+      if (cached) {
+        setObserverLocation({ lat: cached.lat, lon: cached.lon, alt: cached.alt });
+        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
+        setLocationStatusMessage(
+          `Live location unavailable; using last saved location (${new Date(cached.savedAt).toISOString().slice(11, 19)} UTC).`,
+        );
+      } else {
+        if (err instanceof Error) {
+          setLocationStatusMessage(`Unable to retrieve location: ${err.message}`);
+        } else {
+          const geoErr = err as GeolocationPositionError;
+          setLocationStatusMessage(getLocationErrorMessage(geoErr));
+        }
+      }
+    } finally {
+      setIsLocating(false);
+    }
   };
 
   return (
@@ -217,19 +357,62 @@ export function FilterPanel() {
         <div style={sectionHeaderStyle}>Local Visibility</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
            {observerLocation === null ? (
-               <button onClick={handleRequestLocation} style={{
-                   background: 'rgba(255, 255, 255, 0.1)', border: '1px solid rgba(255, 255, 255, 0.2)', color: '#fff', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 11
-               }}>
-                   📍 Use My Location
-               </button>
-           ) : (
-                <>
-                  <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
-                    Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
-                  </div>
-                  <div style={{ fontSize: 10, color: visualStatusColor, marginBottom: 4 }}>
-                    {visualStatusLabel}
-                    {visualList.version ? ` (${visualList.version.slice(11, 19)} UTC)` : ''}
+               <>
+                 <button
+                   onClick={() => void handleRequestLocation()}
+                   disabled={isLocating}
+                   style={{
+                     background: 'rgba(255, 255, 255, 0.1)',
+                     border: '1px solid rgba(255, 255, 255, 0.2)',
+                     color: '#fff',
+                     padding: '6px 12px',
+                     borderRadius: 4,
+                     cursor: isLocating ? 'not-allowed' : 'pointer',
+                     fontFamily: 'inherit',
+                     fontSize: 11,
+                     opacity: isLocating ? 0.6 : 1,
+                   }}
+                 >
+                   {isLocating ? 'Locating...' : '📍 Use My Location'}
+                 </button>
+                 {locationStatusMessage && (
+                   <div style={{ fontSize: 10, color: 'rgba(244, 67, 54, 0.95)', lineHeight: 1.3, marginTop: 4 }}>
+                     {locationStatusMessage}
+                   </div>
+                 )}
+               </>
+            ) : (
+                 <>
+                   <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
+                     Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
+                   </div>
+                   <button
+                     onClick={() => void handleRequestLocation()}
+                     disabled={isLocating}
+                     style={{
+                       alignSelf: 'flex-start',
+                       background: 'rgba(255, 255, 255, 0.08)',
+                       border: '1px solid rgba(255, 255, 255, 0.15)',
+                       color: 'rgba(255, 255, 255, 0.8)',
+                       padding: '4px 8px',
+                       borderRadius: 4,
+                       cursor: isLocating ? 'not-allowed' : 'pointer',
+                       fontFamily: 'inherit',
+                       fontSize: 10,
+                       opacity: isLocating ? 0.6 : 1,
+                       marginBottom: 4,
+                     }}
+                   >
+                     {isLocating ? 'Updating location...' : '↻ Update location'}
+                   </button>
+                   {locationStatusMessage && (
+                     <div style={{ fontSize: 10, color: 'rgba(255, 193, 7, 0.95)', lineHeight: 1.3, marginBottom: 4 }}>
+                       {locationStatusMessage}
+                     </div>
+                   )}
+                   <div style={{ fontSize: 10, color: visualStatusColor, marginBottom: 4 }}>
+                     {visualStatusLabel}
+                     {visualList.version ? ` (${visualList.version.slice(11, 19)} UTC)` : ''}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'all' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
                      <Toggle on={visibilityMode === 'all'} onToggle={() => setVisibilityMode('all')} />
