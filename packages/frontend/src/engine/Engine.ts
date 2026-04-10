@@ -30,11 +30,11 @@ const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 type DsoWorkerInMessage =
   | {
-      type: 'INIT_SNAPSHOTS';
-      dsoIds: string[];
-      snapshots: Record<string, DsoSnapshot>;
-      validToGraceSec?: number;
-    }
+    type: 'INIT_SNAPSHOTS';
+    dsoIds: string[];
+    snapshots: Record<string, DsoSnapshot>;
+    validToGraceSec?: number;
+  }
   | { type: 'SET_DSO_IDS'; dsoIds: string[] }
   | { type: 'UPDATE_SNAPSHOT'; dsoId: string; snapshot: DsoSnapshot | null }
   | { type: 'SET_VALID_TO_GRACE_SEC'; validToGraceSec: number }
@@ -89,7 +89,7 @@ export class Engine {
   private visualListEtag: string | null = null;
   private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private visualRefreshInFlight = false;
-  private observerMarker: THREE.Mesh | null = null;
+  private observerMarker: THREE.Group | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -1104,22 +1104,59 @@ export class Engine {
   private updateObserverMarker(loc: { lat: number; lon: number; alt: number } | null): void {
     if (loc) {
       if (!this.observerMarker) {
-        const geo = new THREE.SphereGeometry(0.03, 16, 16);
+        // Frustum: 160 degree FOV (half-angle 80deg). radius = height * tan(80)
+        // Shallow height=0.02. radiusTop = 0.02 * 5.67 = 0.1134
+        const geo = new THREE.CylinderGeometry(0.1134, 0.002, 0.02, 32, 1, true);
+        geo.translate(0, 0.01, 0); // Offset so base is at (0,0,0)
+        
         const mat = new THREE.MeshBasicMaterial({
           color: 0x00e5ff,
           transparent: true,
-          opacity: 0.95,
-          depthTest: false,
+          opacity: 0.35,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          depthTest: true,
         });
-        this.observerMarker = new THREE.Mesh(geo, mat);
-        this.observerMarker.renderOrder = 1;
+
+        this.observerMarker = new THREE.Group();
         this.earthRenderer.object.add(this.observerMarker);
+        
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 1;
+        this.observerMarker.add(mesh);
+
+        // Add wireframe grid lines
+        const wireframe = new THREE.LineSegments(
+          new THREE.WireframeGeometry(geo),
+          new THREE.LineBasicMaterial({
+            color: 0xff4444, // Faint red
+            transparent: true,
+            opacity: 0.25,
+            depthTest: true,
+            depthWrite: false,
+          })
+        );
+        wireframe.renderOrder = 1;
+        this.observerMarker.add(wireframe);
       }
-      this.observerMarker.position.copy(getObserverECEFPosition(loc.lat, loc.lon));
+      const pos = getObserverECEFPosition(loc.lat, loc.lon);
+      this.observerMarker.position.copy(pos);
+
+      // Orient to surface normal
+      const normal = pos.clone().normalize();
+      this.observerMarker.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        normal
+      );
     } else if (this.observerMarker) {
       this.earthRenderer.object.remove(this.observerMarker);
-      this.observerMarker.geometry.dispose();
-      (this.observerMarker.material as THREE.Material).dispose();
+      this.observerMarker.traverse((child) => {
+        if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+          child.geometry.dispose();
+          (child.material as THREE.Material).dispose();
+        }
+      });
       this.observerMarker = null;
     }
   }
@@ -1172,8 +1209,12 @@ export class Engine {
     window.removeEventListener('resize', this.onResize);
     if (this.observerMarker) {
       this.earthRenderer.object.remove(this.observerMarker);
-      this.observerMarker.geometry.dispose();
-      (this.observerMarker.material as THREE.Material).dispose();
+      this.observerMarker.traverse((child) => {
+        if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+          child.geometry.dispose();
+          (child.material as THREE.Material).dispose();
+        }
+      });
       this.observerMarker = null;
     }
     this.gpuPicker?.dispose();
