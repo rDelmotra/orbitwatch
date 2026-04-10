@@ -27,7 +27,7 @@ const DSO_TRAIL_POINTS = 360;
 const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-const VISUAL_CAMERA_SURFACE_OFFSET_ER = 0.015;
+const VISUAL_CAMERA_SURFACE_OFFSET_ER = 0.003;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 type DsoWorkerInMessage =
@@ -495,15 +495,13 @@ export class Engine {
   }
 
   private focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
-    const observerPos = getObserverScenePosition(
-      loc.lat,
-      loc.lon,
-      loc.alt,
-      new Date(),
-    );
-    const upDir = observerPos.clone().normalize();
-    const camPos = observerPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
-    const lookTarget = observerPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
+    // Anchor to the same Earth-local geolocation point used by the observer marker,
+    // then transform to world space so camera placement exactly matches the location.
+    const observerLocalPos = getObserverECEFPosition(loc.lat, loc.lon);
+    const observerWorldPos = this.earthRenderer.object.localToWorld(observerLocalPos.clone());
+    const upDir = observerWorldPos.clone().normalize();
+    const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
+    const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
 
     const store = useStore.getState();
     if (store.cameraMode !== 'free') {
