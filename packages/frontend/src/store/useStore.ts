@@ -1,11 +1,22 @@
 import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
 import type { DsoObject, DsoSnapshot, TrackedObject } from '../data/dso-types';
+import type { VisualListSource, VisualListStatus } from '../data/visualList';
 import type { DsoLabelPosition } from '../engine/DsoRenderer';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
 export type VisibilityMode = 'all' | 'radio' | 'visual';
+
+export interface VisualListState {
+  status: VisualListStatus;
+  version: string | null;
+  source: VisualListSource;
+  stale: boolean;
+  count: number;
+  updatedAt: number | null;
+  message: string | null;
+}
 
 interface AppState {
   loadingPhase: LoadingPhase;
@@ -44,6 +55,7 @@ interface AppState {
 
   observerLocation: { lat: number; lon: number; alt: number } | null;
   visibilityMode: VisibilityMode;
+  visualList: VisualListState;
 
   categoryFilters: Record<ObjectCategory, boolean>;
   regimeFilters: Record<OrbitalRegime, boolean>;
@@ -81,6 +93,7 @@ interface AppState {
   clearCluster: () => void;
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
+  setVisualListState: (state: VisualListState) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -134,6 +147,15 @@ export const useStore = create<AppState>((set) => ({
 
   observerLocation: null,
   visibilityMode: 'all',
+  visualList: {
+    status: 'loading',
+    version: null,
+    source: null,
+    stale: false,
+    count: 0,
+    updatedAt: null,
+    message: null,
+  },
 
   categoryFilters: {
     active_satellite: true,
@@ -216,7 +238,14 @@ export const useStore = create<AppState>((set) => ({
     }),
   clearCluster: () => set({ clusterItems: [] }),
   setObserverLocation: (loc) => set({ observerLocation: loc }),
-  setVisibilityMode: (mode) => set({ visibilityMode: mode }),
+  setVisibilityMode: (mode) =>
+    set((state) => {
+      if (mode === 'visual' && state.visualList.status === 'unavailable') {
+        return { visibilityMode: 'radio' as VisibilityMode };
+      }
+      return { visibilityMode: mode };
+    }),
+  setVisualListState: (visualList) => set({ visualList }),
 
   setDsoObjects: (objects) =>
     set((state) => ({

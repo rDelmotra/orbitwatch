@@ -4,7 +4,11 @@ import { EarthRenderer } from './EarthRenderer';
 import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
-import { fetchVisualNoradIds } from '../data/visualList';
+import {
+  fetchVisualList,
+  reconcileVisibilityModeForVisualStatus,
+  type VisualListResolvedResult,
+} from '../data/visualList';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
 import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
@@ -22,6 +26,7 @@ const DSO_VALID_TO_GRACE_SEC = 600;
 const DSO_TRAIL_POINTS = 360;
 const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
+const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 type DsoWorkerInMessage =
   | {
@@ -81,6 +86,9 @@ export class Engine {
   private useHardReset = false;
   private dragExitedFollowing = false;
   private visualNoradIds: Set<number> = new Set();
+  private visualListEtag: string | null = null;
+  private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  private visualRefreshInFlight = false;
   private observerMarker: THREE.Mesh | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -204,10 +212,18 @@ export class Engine {
     try {
       store.setLoadingPhase('fetching');
       const apiUrl = import.meta.env.VITE_API_URL ?? '';
-      // Visual list is optional: keep TLE bootstrap fast even if this request fails.
-      void fetchVisualNoradIds(apiUrl).then((visualIds) => {
-        this.visualNoradIds = visualIds;
+      store.setVisualListState({
+        status: 'loading',
+        version: null,
+        source: null,
+        stale: false,
+        count: 0,
+        updatedAt: null,
+        message: null,
       });
+      this.startVisualRefreshLoop(apiUrl);
+      // Keep visual list refresh non-blocking for TLE bootstrap.
+      void this.refreshVisualList(apiUrl);
 
       const res = await fetch(`${apiUrl}/api/tle/all`);
       if (!res.ok) throw new Error(`TLE fetch failed: ${res.status}`);
@@ -322,38 +338,10 @@ export class Engine {
           prevVisMode = state.visibilityMode;
           prevObsLoc = state.observerLocation;
 
-          let observerPos: THREE.Vector3 | null = null;
-          if (state.visibilityMode !== 'all' && state.observerLocation) {
-             observerPos = getObserverScenePosition(
-               state.observerLocation.lat,
-               state.observerLocation.lon,
-               state.observerLocation.alt,
-               new Date()
-             );
-          }
-          const sunDir = getSunDirection(new Date());
-
-          const counts = this.satelliteRenderer.applyFilters(
-            this.catalogData,
-            state.categoryFilters,
-            state.regimeFilters,
-            observerPos,
-            sunDir,
-            state.visibilityMode,
-            this.visualNoradIds
-          );
-          useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+          this.recomputeVisibleCounts(state);
 
           if (obsLocChanged) {
             this.updateObserverMarker(state.observerLocation);
-          }
-
-          const sel = useStore.getState().selectedIndex;
-          if (sel !== null && sel < this.catalogData.length) {
-            const sizeArr = this.satelliteRenderer.mesh.geometry.getAttribute('size').array as Float32Array;
-            if (sizeArr[sel] < 0.01) {
-              useStore.getState().setSelectedSatellite(null, null);
-            }
           }
         }
       });
@@ -400,15 +388,7 @@ export class Engine {
           }, 1000);
         } else if (msg.type === 'POSITIONS') {
           const state = useStore.getState();
-          let observerPos: THREE.Vector3 | null = null;
-          if (state.visibilityMode !== 'all' && state.observerLocation) {
-             observerPos = getObserverScenePosition(
-               state.observerLocation.lat,
-               state.observerLocation.lon,
-               state.observerLocation.alt,
-               new Date()
-             );
-          }
+          const observerPos = this.getObserverScenePositionForState(state);
           const sunDir = getSunDirection(new Date());
 
           const counts = this.satelliteRenderer.updatePositions(
@@ -444,6 +424,119 @@ export class Engine {
       useStore.getState().setLoadingError(
         err instanceof Error ? err.message : 'Failed to load satellite data',
       );
+    }
+  }
+
+  private startVisualRefreshLoop(apiUrl: string): void {
+    if (this.visualRefreshInterval !== null) {
+      clearInterval(this.visualRefreshInterval);
+    }
+
+    this.visualRefreshInterval = setInterval(() => {
+      void this.refreshVisualList(apiUrl);
+    }, VISUAL_REFRESH_INTERVAL_MS);
+  }
+
+  private getObserverScenePositionForState(
+    state: ReturnType<typeof useStore.getState>,
+  ): THREE.Vector3 | null {
+    if (state.visibilityMode === 'all' || !state.observerLocation) {
+      return null;
+    }
+
+    return getObserverScenePosition(
+      state.observerLocation.lat,
+      state.observerLocation.lon,
+      state.observerLocation.alt,
+      new Date(),
+    );
+  }
+
+  private recomputeVisibleCounts(state: ReturnType<typeof useStore.getState>): void {
+    if (!this.firstPositionReceived || this.catalogData.length === 0) {
+      return;
+    }
+
+    const observerPos = this.getObserverScenePositionForState(state);
+    const sunDir = getSunDirection(new Date());
+
+    const counts = this.satelliteRenderer.applyFilters(
+      this.catalogData,
+      state.categoryFilters,
+      state.regimeFilters,
+      observerPos,
+      sunDir,
+      state.visibilityMode,
+      this.visualNoradIds,
+    );
+    useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+
+    const sel = state.selectedIndex;
+    if (sel !== null && sel < this.catalogData.length) {
+      const sizeArr = this.satelliteRenderer.mesh.geometry.getAttribute('size').array as Float32Array;
+      if (sizeArr[sel] < 0.01) {
+        useStore.getState().setSelectedSatellite(null, null);
+      }
+    }
+  }
+
+  private applyVisualListResult(result: VisualListResolvedResult): void {
+    const store = useStore.getState();
+    this.visualNoradIds = result.ids;
+
+    store.setVisualListState({
+      status: result.status,
+      version: result.version,
+      source: result.source,
+      stale: result.stale,
+      count: result.ids.size,
+      updatedAt: Date.now(),
+      message: result.message,
+    });
+
+    const nextMode = reconcileVisibilityModeForVisualStatus(
+      store.visibilityMode,
+      result.status,
+    );
+    if (nextMode !== store.visibilityMode) {
+      store.setVisibilityMode(nextMode);
+    }
+
+    this.recomputeVisibleCounts(useStore.getState());
+  }
+
+  private async refreshVisualList(apiUrl: string): Promise<void> {
+    if (this.visualRefreshInFlight) {
+      return;
+    }
+
+    this.visualRefreshInFlight = true;
+    try {
+      const result = await fetchVisualList({
+        apiBase: apiUrl,
+        etag: this.visualListEtag,
+      });
+
+      if (result.kind === 'not_modified') {
+        return;
+      }
+
+      this.visualListEtag = result.etag ?? this.visualListEtag;
+      this.applyVisualListResult(result);
+    } catch (err) {
+      console.warn('Visual list refresh error:', err);
+      this.applyVisualListResult({
+        kind: 'resolved',
+        ids: new Set(),
+        status: 'unavailable',
+        source: null,
+        stale: false,
+        version: null,
+        etag: this.visualListEtag,
+        message: 'Visual list refresh failed unexpectedly.',
+      });
+    } finally {
+      this.visualRefreshInFlight = false;
     }
   }
 
@@ -1051,6 +1144,10 @@ export class Engine {
     }
     if (this.propagationInterval !== null) {
       clearInterval(this.propagationInterval);
+    }
+    if (this.visualRefreshInterval !== null) {
+      clearInterval(this.visualRefreshInterval);
+      this.visualRefreshInterval = null;
     }
     this.controls.removeEventListener('start', this.onControlsStart);
     this.cameraModeUnsub?.();

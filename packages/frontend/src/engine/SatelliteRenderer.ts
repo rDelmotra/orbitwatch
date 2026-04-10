@@ -215,11 +215,39 @@ export class SatelliteRenderer {
       if (isVisibleBase) {
         finalMult = this.multipliers[i];
 
-        // Naked-eye NORAD gate: early exit before any vector math.
-        // If the visual list failed to load (empty set), skip this gate gracefully.
-        if (visibilityMode === 'visual' && hasVisualList && !visualNoradIds.has(obj.noradId)) {
-          finalMult = 0.0;
-        } else if (visibilityMode !== 'all' && observerPos) {
+        if (visibilityMode === 'visual') {
+          // Fail-closed: visual mode requires curated NORAD membership + observer location.
+          if (!hasVisualList || !visualNoradIds.has(obj.noradId) || !observerPos) {
+            finalMult = 0.0;
+          } else {
+            const i3 = i * 3;
+            satPos.set(currArr[i3], currArr[i3 + 1], currArr[i3 + 2]);
+
+            const V = satPos.clone().sub(observerPos);
+            const vDist = V.length();
+            const zenith = observerPos.clone().normalize();
+            const sinElev = V.dot(zenith) / vDist;
+
+            if (sinElev < 0.1736) { // Below 10 degrees elevation
+              finalMult = 0.0;
+            } else {
+              // Hard 2000 km range cutoff — eliminates MEO/GEO/HEO clutter
+              const distKm = vDist * 6371;
+              if (distKm > 2000) {
+                finalMult = 0.0;
+              } else if (!obsInDark || isEclipsed(satPos, sunDir)) {
+                finalMult = 0.0;
+              } else {
+                finalMult *= getPhaseMultiplier(satPos, observerPos, sunDir) * 1.5;
+              }
+
+              // Fading cone: gradual falloff from 45° to 10° elevation
+              if (finalMult > 0.0 && sinElev < 0.707) {
+                finalMult *= Math.max(0.4, (sinElev - 0.1736) / (0.707 - 0.1736));
+              }
+            }
+          }
+        } else if (visibilityMode === 'radio' && observerPos) {
           const i3 = i * 3;
           satPos.set(currArr[i3], currArr[i3 + 1], currArr[i3 + 2]);
 
@@ -231,22 +259,10 @@ export class SatelliteRenderer {
           if (sinElev < 0.1736) { // Below 10 degrees elevation
             finalMult = 0.0;
           } else {
-            if (visibilityMode === 'visual') {
-              // Hard 2000 km range cutoff — eliminates MEO/GEO/HEO clutter
-              const distKm = vDist * 6371;
-              if (distKm > 2000) {
-                finalMult = 0.0;
-              } else if (!obsInDark || isEclipsed(satPos, sunDir)) {
-                finalMult = 0.0;
-              } else {
-                finalMult *= getPhaseMultiplier(satPos, observerPos, sunDir) * 1.5;
-              }
-            } else {
-              // Radio pass: RCS multiplier already in finalMult; apply range + mode scalar
-              const distKm = vDist * 6371;
-              const rangeScale = Math.max(0.3, Math.min(1.0, 2000 / distKm));
-              finalMult *= rangeScale * 0.6;
-            }
+            // Radio pass: RCS multiplier already in finalMult; apply range + mode scalar
+            const distKm = vDist * 6371;
+            const rangeScale = Math.max(0.3, Math.min(1.0, 2000 / distKm));
+            finalMult *= rangeScale * 0.6;
 
             // Fading cone: gradual falloff from 45° to 10° elevation
             if (finalMult > 0.0 && sinElev < 0.707) {

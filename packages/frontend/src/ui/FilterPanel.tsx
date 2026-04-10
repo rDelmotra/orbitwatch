@@ -19,23 +19,34 @@ const REGIMES: { key: OrbitalRegime; label: string }[] = [
   { key: 'OTHER', label: 'Other' },
 ];
 
-function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+function Toggle({
+  on,
+  onToggle,
+  disabled = false,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       role="switch"
       aria-checked={on}
+      aria-disabled={disabled}
       onClick={onToggle}
+      disabled={disabled}
       style={{
         width: 32,
         height: 16,
         borderRadius: 8,
         border: 'none',
         padding: 0,
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
         background: on ? 'rgba(255, 255, 255, 0.25)' : 'rgba(255, 255, 255, 0.08)',
         position: 'relative',
         flexShrink: 0,
         transition: 'background 0.15s',
+        opacity: disabled ? 0.45 : 1,
       }}
     >
       <span
@@ -101,12 +112,30 @@ export function FilterPanel() {
   const observerLocation = useStore((s) => s.observerLocation);
   const setVisibilityMode = useStore((s) => s.setVisibilityMode);
   const setObserverLocation = useStore((s) => s.setObserverLocation);
+  const visualList = useStore((s) => s.visualList);
 
   const [open, setOpen] = useState(true);
 
   if (loadingPhase !== 'ready') return null;
 
   const totalVisible = Object.values(visibleCatCounts).reduce((a, b) => a + b, 0);
+  const visualModeAvailable = visualList.status === 'fresh' || visualList.status === 'stale';
+
+  const visualStatusColor = visualList.status === 'fresh'
+    ? 'rgba(76, 175, 80, 0.9)'
+    : visualList.status === 'stale'
+      ? 'rgba(255, 193, 7, 0.95)'
+      : visualList.status === 'loading'
+        ? 'rgba(255, 255, 255, 0.65)'
+        : 'rgba(244, 67, 54, 0.95)';
+
+  const visualStatusLabel = visualList.status === 'fresh'
+    ? 'VISUAL list: Fresh'
+    : visualList.status === 'stale'
+      ? 'VISUAL list: Stale cache'
+      : visualList.status === 'loading'
+        ? 'VISUAL list: Loading'
+        : 'VISUAL list: Unavailable';
 
   const handleRequestLocation = () => {
     if (!navigator.geolocation) {
@@ -118,7 +147,7 @@ export function FilterPanel() {
         // Convert altitude from meters to KM if available, otherwise assume roughly 0
         const altKm = pos.coords.altitude ? pos.coords.altitude / 1000 : 0.0;
         setObserverLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, alt: altKm });
-        setVisibilityMode('visual');
+        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
       },
       (err) => {
         alert(`Unable to retrieve location: ${err.message}`);
@@ -194,13 +223,17 @@ export function FilterPanel() {
                    📍 Use My Location
                </button>
            ) : (
-               <>
-                 <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
-                   Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
-                 </div>
-                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'all' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
-                    <Toggle on={visibilityMode === 'all'} onToggle={() => setVisibilityMode('all')} />
-                    <span>Show All (Global)</span>
+                <>
+                  <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
+                    Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
+                  </div>
+                  <div style={{ fontSize: 10, color: visualStatusColor, marginBottom: 4 }}>
+                    {visualStatusLabel}
+                    {visualList.version ? ` (${visualList.version.slice(11, 19)} UTC)` : ''}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'all' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
+                     <Toggle on={visibilityMode === 'all'} onToggle={() => setVisibilityMode('all')} />
+                     <span>Show All (Global)</span>
                     {visibilityMode === 'all' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
                  </div>
                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'radio' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
@@ -208,14 +241,28 @@ export function FilterPanel() {
                     <span>Radio Pass (&gt;10° Elev)</span>
                     {visibilityMode === 'radio' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
                  </div>
-                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'visual' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
-                    <Toggle on={visibilityMode === 'visual'} onToggle={() => setVisibilityMode('visual')} />
-                    <span title="CelesTrak curated list, <2000km, sunlit, dark sky">Naked Eye Stargazer</span>
-                    {visibilityMode === 'visual' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
-                 </div>
-               </>
-           )}
-        </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'visual' ? 1 : (visualModeAvailable ? 0.4 : 0.25), transition: 'opacity 0.15s' }}>
+                     <Toggle
+                      on={visibilityMode === 'visual'}
+                      onToggle={() => setVisibilityMode('visual')}
+                      disabled={!visualModeAvailable}
+                     />
+                     <span title="Curated CelesTrak VISUAL list + local range/elevation/sunlight constraints">Naked-Eye Candidates</span>
+                     {visibilityMode === 'visual' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
+                  </div>
+                  {visualList.status === 'stale' && (
+                    <div style={{ fontSize: 10, color: 'rgba(255, 193, 7, 0.95)', lineHeight: 1.3, marginTop: 2 }}>
+                      Using cached curated list; results may be outdated.
+                    </div>
+                  )}
+                  {visualList.status === 'unavailable' && (
+                    <div style={{ fontSize: 10, color: 'rgba(244, 67, 54, 0.95)', lineHeight: 1.3, marginTop: 2 }}>
+                      Curated visual list unavailable; switched to Radio Pass mode.
+                    </div>
+                  )}
+                </>
+            )}
+         </div>
 
         <div
           style={{

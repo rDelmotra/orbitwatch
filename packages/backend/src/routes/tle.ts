@@ -9,6 +9,11 @@ import {
 import type { VisualNoradCache } from '../cache/file-cache.js';
 import { fetchCelesTrakVisualNoradIds } from '../services/celestrak-visual.js';
 import { logger } from '../utils/logger.js';
+import {
+  buildVisualEndpointResponse,
+  resolveVisualPayload,
+  type VisualDataSource,
+} from './tle-visual.js';
 
 const router = Router();
 let visualRefreshInFlight: Promise<VisualNoradCache> | null = null;
@@ -30,7 +35,7 @@ function sendVisualResponse(
   req: Request,
   res: Response,
   payload: VisualNoradCache,
-  source: 'celestrak' | 'cache',
+  source: VisualDataSource,
   stale: boolean,
 ): void {
   const etag = `"${payload.version}"`;
@@ -44,13 +49,7 @@ function sendVisualResponse(
   if (stale) {
     res.setHeader('X-Data-Stale', '1');
   }
-  res.json({
-    version: payload.version,
-    count: payload.ids.length,
-    ids: payload.ids,
-    source,
-    stale,
-  });
+  res.json(buildVisualEndpointResponse(payload, source, stale));
 }
 
 // ============================================================
@@ -103,27 +102,27 @@ router.get('/all', (req: Request, res: Response) => {
 // ============================================================
 router.get('/visual', async (req: Request, res: Response) => {
   const cached = readVisualCache();
-  if (cached && isVisualCacheFresh()) {
-    sendVisualResponse(req, res, cached, 'cache', false);
-    return;
-  }
+  const resolved = await resolveVisualPayload(
+    cached,
+    Boolean(cached && isVisualCacheFresh()),
+    refreshVisualCache,
+  );
 
-  try {
-    const fresh = await refreshVisualCache();
-    sendVisualResponse(req, res, fresh, 'celestrak', false);
-    return;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown error';
-    if (cached) {
-      logger.warn(`GET /api/tle/visual: serving stale cache after fetch failure: ${message}`);
-      sendVisualResponse(req, res, cached, 'cache', true);
-      return;
+  if (resolved.kind === 'ok') {
+    if (resolved.refreshError) {
+      logger.warn(
+        `GET /api/tle/visual: serving stale cache after fetch failure: ${resolved.refreshError}`,
+      );
     }
-
-    logger.error(`GET /api/tle/visual: upstream fetch failed and no cache exists: ${message}`);
-    res.status(503).json({ error: 'Visual list unavailable. Try again shortly.' });
+    sendVisualResponse(req, res, resolved.payload, resolved.source, resolved.stale);
     return;
   }
+
+  logger.error(
+    `GET /api/tle/visual: upstream fetch failed and no cache exists: ${resolved.message}`,
+  );
+  res.status(503).json({ error: 'Visual list unavailable. Try again shortly.' });
+  return;
 });
 
 // ============================================================

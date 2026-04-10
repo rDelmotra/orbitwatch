@@ -1,14 +1,60 @@
-const STORAGE_KEY = 'orbitwatch:visualNoradIds:v2';
+const STORAGE_KEY = 'orbitwatch:visualNoradIds:v3';
 const REQUEST_TIMEOUT_MS = 8_000;
-const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Align local fallback cache with backend visual TTL (8h).
+const CACHE_MAX_AGE_MS = 8 * 60 * 60 * 1000;
+
+export type VisualListStatus = 'loading' | 'fresh' | 'stale' | 'unavailable';
+export type VisualListSource = 'celestrak' | 'cache' | 'local_storage' | null;
+export type VisibilityModeLike = 'all' | 'radio' | 'visual';
+
+export interface VisualListResolvedResult {
+  kind: 'resolved';
+  ids: Set<number>;
+  status: Exclude<VisualListStatus, 'loading'>;
+  source: VisualListSource;
+  stale: boolean;
+  version: string | null;
+  etag: string | null;
+  message: string | null;
+}
+
+export interface VisualListNotModifiedResult {
+  kind: 'not_modified';
+  etag: string | null;
+}
+
+export type VisualListFetchResult = VisualListResolvedResult | VisualListNotModifiedResult;
 
 interface VisualListApiResponse {
-  ids: unknown[];
+  version: unknown;
+  ids: unknown;
+  source: unknown;
+  stale: unknown;
 }
 
 interface VisualNoradCacheEnvelope {
   cachedAt: string;
   ids: number[];
+  version: string | null;
+  source: Exclude<VisualListSource, null>;
+  stale: boolean;
+  etag: string | null;
+}
+
+interface FetchVisualListOptions {
+  apiBase?: string;
+  etag?: string | null;
+}
+
+function getStorage(): Storage | null {
+  return typeof localStorage === 'undefined' ? null : localStorage;
+}
+
+function getTimerApi(): Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'> {
+  if (typeof window !== 'undefined') {
+    return window;
+  }
+  return globalThis;
 }
 
 function toNoradId(value: unknown): number | null {
@@ -31,33 +77,42 @@ function normalizeNoradIds(values: unknown[]): number[] {
   return Array.from(ids).sort((a, b) => a - b);
 }
 
-function writeCachedVisualNoradIds(ids: number[]): void {
+function writeCachedVisualList(result: VisualListResolvedResult): void {
+  if (result.status === 'unavailable') {
+    return;
+  }
+
+  const storage = getStorage();
+  if (!storage) {
+    return;
+  }
+
   try {
     const payload: VisualNoradCacheEnvelope = {
       cachedAt: new Date().toISOString(),
-      ids,
+      ids: Array.from(result.ids).sort((a, b) => a - b),
+      version: result.version,
+      source: result.source === 'local_storage' ? 'cache' : (result.source ?? 'cache'),
+      stale: result.stale,
+      etag: result.etag,
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    storage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch (err) {
     console.warn('Failed to persist visual NORAD cache:', err);
   }
 }
 
-function readCachedVisualNoradIds(): Set<number> | null {
+function readCachedVisualListForFallback(): VisualListResolvedResult | null {
+  const storage = getStorage();
+  if (!storage) {
+    return null;
+  }
+
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return null;
 
     const parsed = JSON.parse(raw) as unknown;
-
-    // Backward compatibility with the old cache shape (number[] only).
-    if (Array.isArray(parsed)) {
-      const legacyIds = normalizeNoradIds(parsed);
-      if (legacyIds.length === 0) return null;
-      writeCachedVisualNoradIds(legacyIds);
-      return new Set(legacyIds);
-    }
-
     if (!parsed || typeof parsed !== 'object') return null;
 
     const envelope = parsed as Partial<VisualNoradCacheEnvelope>;
@@ -65,66 +120,127 @@ function readCachedVisualNoradIds(): Set<number> | null {
 
     const cachedAtMs = Date.parse(envelope.cachedAt);
     if (!Number.isFinite(cachedAtMs) || Date.now() - cachedAtMs > CACHE_MAX_AGE_MS) {
-      localStorage.removeItem(STORAGE_KEY);
+      storage.removeItem(STORAGE_KEY);
       return null;
     }
 
     const ids = normalizeNoradIds(envelope.ids);
-    return ids.length > 0 ? new Set(ids) : null;
+    if (ids.length === 0) return null;
+
+    return {
+      kind: 'resolved',
+      ids: new Set(ids),
+      status: 'stale',
+      source: 'local_storage',
+      stale: true,
+      version: typeof envelope.version === 'string' ? envelope.version : null,
+      etag: typeof envelope.etag === 'string' ? envelope.etag : null,
+      message: 'Using local cached visual list due to backend fetch failure.',
+    };
   } catch (err) {
     console.warn('Failed to read visual NORAD cache:', err);
     return null;
   }
 }
 
-function parseVisualListResponse(payload: unknown): number[] {
+export function parseVisualListResponse(
+  payload: unknown,
+  etag: string | null,
+): VisualListResolvedResult {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Visual endpoint returned invalid payload');
   }
 
-  const maybeIds = (payload as Partial<VisualListApiResponse>).ids;
-  if (!Array.isArray(maybeIds)) {
+  const body = payload as Partial<VisualListApiResponse>;
+  if (!Array.isArray(body.ids)) {
     throw new Error('Visual endpoint payload missing ids[]');
   }
 
-  const ids = normalizeNoradIds(maybeIds);
+  const ids = normalizeNoradIds(body.ids);
   if (ids.length === 0) {
     throw new Error('Visual endpoint returned no NORAD IDs');
   }
 
-  return ids;
+  const stale = body.stale === true;
+  const source =
+    body.source === 'celestrak' || body.source === 'cache'
+      ? body.source
+      : null;
+  const version = typeof body.version === 'string' ? body.version : null;
+
+  return {
+    kind: 'resolved',
+    ids: new Set(ids),
+    status: stale ? 'stale' : 'fresh',
+    source,
+    stale,
+    version,
+    etag: etag ?? (version ? `"${version}"` : null),
+    message: stale ? 'Using stale backend visual cache.' : null,
+  };
 }
 
-/**
- * Fetches the backend-proxied CelesTrak "visual" list and returns NORAD IDs.
- * The request is fail-open: cached localStorage data is used on any fetch error.
- */
-export async function fetchVisualNoradIds(apiBase = import.meta.env.VITE_API_URL ?? ''): Promise<Set<number>> {
+export function reconcileVisibilityModeForVisualStatus(
+  currentMode: VisibilityModeLike,
+  visualStatus: VisualListStatus,
+): VisibilityModeLike {
+  if (currentMode === 'visual' && visualStatus === 'unavailable') {
+    return 'radio';
+  }
+  return currentMode;
+}
+
+export async function fetchVisualList(
+  options: FetchVisualListOptions = {},
+): Promise<VisualListFetchResult> {
+  const apiBase = options.apiBase ?? (import.meta.env?.VITE_API_URL ?? '');
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timerApi = getTimerApi();
+  const timeoutId = timerApi.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    const headers: HeadersInit = {};
+    if (options.etag) {
+      headers['If-None-Match'] = options.etag;
+    }
+
     const res = await fetch(`${apiBase}/api/tle/visual`, {
       signal: controller.signal,
+      headers,
       cache: 'no-store',
     });
+
+    if (res.status === 304) {
+      return {
+        kind: 'not_modified',
+        etag: options.etag ?? null,
+      };
+    }
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const payload = (await res.json()) as unknown;
-    const ids = parseVisualListResponse(payload);
-    writeCachedVisualNoradIds(ids);
-    console.log(`Loaded ${ids.length} visual NORAD IDs from backend`);
-    return new Set(ids);
+    const parsed = parseVisualListResponse(payload, res.headers.get('ETag'));
+    writeCachedVisualList(parsed);
+    return parsed;
   } catch (err) {
-    const cached = readCachedVisualNoradIds();
+    const cached = readCachedVisualListForFallback();
     if (cached) {
-      console.log(`Loaded ${cached.size} visual NORAD IDs from localStorage cache`);
       return cached;
     }
 
-    console.warn('Visual NORAD list unavailable and no cache — NORAD gate disabled', err);
-    return new Set();
+    const reason = err instanceof Error ? err.message : 'unknown error';
+    return {
+      kind: 'resolved',
+      ids: new Set(),
+      status: 'unavailable',
+      source: null,
+      stale: false,
+      version: null,
+      etag: options.etag ?? null,
+      message: `Visual list unavailable: ${reason}`,
+    };
   } finally {
-    window.clearTimeout(timeoutId);
+    timerApi.clearTimeout(timeoutId);
   }
 }
