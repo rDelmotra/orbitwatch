@@ -351,6 +351,18 @@ export class SatelliteRenderer {
     return this.applyVisibilityAndFilters(catalogData.length, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds);
   }
 
+  getVisibleIndices(count: number): number[] {
+    const sizeArr = this.currSizeAttr.array as Float32Array;
+    const max = Math.min(count, sizeArr.length);
+    const visible: number[] = [];
+    for (let i = 0; i < max; i++) {
+      if (sizeArr[i] > 0.0) {
+        visible.push(i);
+      }
+    }
+    return visible;
+  }
+
   dispose(): void {
     this.geometry.dispose();
     this.material.dispose();

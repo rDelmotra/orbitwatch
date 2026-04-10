@@ -5,6 +5,7 @@ import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import {
+  predictVisualPass,
   type PassPredictionWorkerRequest,
   type PassPredictionWorkerResponse,
 } from '../orbital/passPrediction';
@@ -19,6 +20,7 @@ import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, Orb
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
+import { VisualPassTrailsRenderer } from './VisualPassTrailsRenderer';
 import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
@@ -32,6 +34,10 @@ const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const PASS_PREDICTION_REFRESH_INTERVAL_MS = 30_000;
+const VISUAL_FIELD_TRAIL_REFRESH_INTERVAL_MS = 20_000;
+const VISUAL_FIELD_TRAIL_HORIZON_MS = 2 * 60 * 60 * 1000;
+const VISUAL_FIELD_TRAIL_SAMPLE_MS = 20_000;
+const VISUAL_FIELD_TRAIL_POINTS = 64;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
@@ -63,6 +69,7 @@ export class Engine {
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
+  private visualPassTrailsRenderer: VisualPassTrailsRenderer;
   private worker: Worker | null = null;
   private dsoWorker: Worker | null = null;
   private passPredictionWorker: Worker | null = null;
@@ -98,6 +105,8 @@ export class Engine {
   private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private visualRefreshInFlight = false;
   private visualPassRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  private visualFieldTrailRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  private visualFieldTrailInFlight = false;
   private visualPassRequestId = 0;
   private visualPassTrailTeme: Float32Array | null = null;
   private visualPassTrailNoradId: number | null = null;
@@ -148,6 +157,7 @@ export class Engine {
 
     // ── Orbit trail ─────────────────────────────────────────────────────────
     this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
+    this.visualPassTrailsRenderer = new VisualPassTrailsRenderer(this.scene);
 
     // ── Camera controller ────────────────────────────────────────────────────
     this.cameraController = new CameraController(this.camera);
@@ -313,6 +323,7 @@ export class Engine {
       this.initDsoWorker();
       this.initPassPredictionWorker();
       this.startVisualPassRefreshLoop();
+      this.startVisualFieldTrailRefreshLoop();
 
       // ── DSO catalog subscription ────────────────────────────────────────────
       // Re-init DSO renderer whenever dsoObjects changes in the store.
@@ -382,8 +393,9 @@ export class Engine {
             this.resetCamera();
           }
 
-          if ((state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) && (modeChanged || obsLocChanged)) {
+          if (modeChanged || obsLocChanged) {
             this.refreshOrbitTrail(state);
+            this.refreshVisualFieldTrails(state);
           }
         }
       });
@@ -479,6 +491,7 @@ export class Engine {
           if (!this.firstPositionReceived) {
             this.firstPositionReceived = true;
             useStore.getState().setLoadingPhase('ready');
+            this.refreshVisualFieldTrails(useStore.getState());
           }
         }
       };
@@ -510,6 +523,63 @@ export class Engine {
     this.visualPassRefreshInterval = setInterval(() => {
       this.requestVisualPassPrediction(useStore.getState());
     }, PASS_PREDICTION_REFRESH_INTERVAL_MS);
+  }
+
+  private startVisualFieldTrailRefreshLoop(): void {
+    if (this.visualFieldTrailRefreshInterval !== null) {
+      clearInterval(this.visualFieldTrailRefreshInterval);
+    }
+
+    this.visualFieldTrailRefreshInterval = setInterval(() => {
+      this.refreshVisualFieldTrails(useStore.getState());
+    }, VISUAL_FIELD_TRAIL_REFRESH_INTERVAL_MS);
+  }
+
+  private refreshVisualFieldTrails(
+    state: ReturnType<typeof useStore.getState> = useStore.getState(),
+  ): void {
+    if (!this.shouldRenderVisualFieldTrails(state) || !state.observerLocation) {
+      this.visualPassTrailsRenderer.clear();
+      return;
+    }
+
+    if (!this.firstPositionReceived || this.catalogData.length === 0 || this.visualFieldTrailInFlight) {
+      return;
+    }
+
+    this.visualFieldTrailInFlight = true;
+    try {
+      const nowMs = Date.now();
+      const visibleIndices = this.satelliteRenderer.getVisibleIndices(this.catalogData.length);
+      const trails: Float32Array[] = [];
+
+      for (const index of visibleIndices) {
+        if (index < 0 || index >= this.catalogData.length) {
+          continue;
+        }
+
+        const sat = this.catalogData[index];
+        const result = predictVisualPass({
+          line1: sat.line1,
+          line2: sat.line2,
+          observer: state.observerLocation,
+          nowMs,
+          isCurated: this.visualNoradIds.has(sat.noradId),
+          mode: 'visual',
+          predictionHorizonMs: VISUAL_FIELD_TRAIL_HORIZON_MS,
+          sampleCadenceMs: VISUAL_FIELD_TRAIL_SAMPLE_MS,
+          trailPointCount: VISUAL_FIELD_TRAIL_POINTS,
+        });
+
+        if (result.kind === 'ready' && result.prediction.trailPositionsTeme.length >= 6) {
+          trails.push(result.prediction.trailPositionsTeme);
+        }
+      }
+
+      this.visualPassTrailsRenderer.setTrails(trails);
+    } finally {
+      this.visualFieldTrailInFlight = false;
+    }
   }
 
   private initPassPredictionWorker(): void {
@@ -626,7 +696,11 @@ export class Engine {
     this.visualPassRequestId = requestId;
 
     const selectedIndex = state.selectedIndex;
-    const shouldRefreshTrail = state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state);
+    const hadPredictedTrail = this.visualPassTrailTeme !== null;
+    const shouldRefreshTrail =
+      state.showOrbitTrail
+      || this.shouldAutoRenderVisualPassTrail(state)
+      || hadPredictedTrail;
     if (
       state.visibilityMode !== 'visual'
       || selectedIndex === null
@@ -646,9 +720,10 @@ export class Engine {
         durationMs: null,
         message: null,
       });
-      if (state.showOrbitTrail) {
+      if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
+      this.refreshVisualFieldTrails(state);
       return;
     }
 
@@ -670,6 +745,7 @@ export class Engine {
       if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
+      this.refreshVisualFieldTrails(state);
       return;
     }
 
@@ -690,6 +766,7 @@ export class Engine {
       if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
+      this.refreshVisualFieldTrails(state);
       return;
     }
 
@@ -710,6 +787,7 @@ export class Engine {
       if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
+      this.refreshVisualFieldTrails(state);
       return;
     }
 
@@ -730,6 +808,7 @@ export class Engine {
       if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
+      this.refreshVisualFieldTrails(state);
       return;
     }
 
@@ -870,6 +949,7 @@ export class Engine {
 
     this.recomputeVisibleCounts(useStore.getState());
     this.requestVisualPassPrediction(useStore.getState());
+    this.refreshVisualFieldTrails(useStore.getState());
   }
 
   private async refreshVisualList(apiUrl: string): Promise<void> {
@@ -1066,6 +1146,12 @@ export class Engine {
       && state.selectedIndex !== null
       && state.selectedIndex >= 0
       && state.selectedIndex < this.catalogData.length;
+  }
+
+  private shouldRenderVisualFieldTrails(
+    state: ReturnType<typeof useStore.getState> = useStore.getState(),
+  ): boolean {
+    return state.visibilityMode === 'visual' && state.observerLocation !== null;
   }
 
   private refreshOrbitTrail(
@@ -1595,6 +1681,10 @@ export class Engine {
       clearInterval(this.visualPassRefreshInterval);
       this.visualPassRefreshInterval = null;
     }
+    if (this.visualFieldTrailRefreshInterval !== null) {
+      clearInterval(this.visualFieldTrailRefreshInterval);
+      this.visualFieldTrailRefreshInterval = null;
+    }
     this.controls.removeEventListener('start', this.onControlsStart);
     this.cameraModeUnsub?.();
     this.filterUnsub?.();
@@ -1631,6 +1721,7 @@ export class Engine {
     this.gpuPicker?.dispose();
     this.dsoRenderer.dispose();
     this.orbitTrailRenderer.dispose();
+    this.visualPassTrailsRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();
     this.starfieldRenderer.dispose();
