@@ -95,7 +95,7 @@ export const DSO_REGISTRY = [
     regime: 'LUNAR',
     mission: 'Artemis II',
     description: 'First crewed mission of NASA’s Artemis program, planned to fly astronauts around the Moon and return to Earth.',
-    launchDate: '2026-04-03', // Updated expected timeframe (subject to change)
+    launchDate: '2026-04-01', // Updated expected timeframe (subject to change)
     validFutureWindowSec: 21_600,
     searchAliases: ['artemis', 'artemis ii', 'artemis 2', 'nasa artemis ii'],
   }),
