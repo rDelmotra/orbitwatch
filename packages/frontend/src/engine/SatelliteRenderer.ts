@@ -2,7 +2,17 @@ import * as THREE from 'three';
 import vertexShader from '../shaders/catalog.vert.glsl?raw';
 import fragmentShader from '../shaders/catalog.frag.glsl?raw';
 import { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
-import { isEclipsed, isObserverInDark, getPhaseMultiplier } from '../orbital/lighting';
+import {
+  getPhaseMultiplierFromComponents,
+  isEclipsedFromComponents,
+  isObserverInDarkFromComponents,
+} from '../orbital/lighting';
+import {
+  evaluateVisualVisibility,
+  VISUAL_ELEVATION_THRESHOLD_SIN,
+  VISUAL_FADING_START_SIN,
+  VISUAL_RANGE_MAX_KM,
+} from '../orbital/visual-visibility';
 import type { VisibilityMode } from '../store/useStore';
 
 const MAX_OBJECTS = 100_000;
@@ -201,8 +211,22 @@ export class SatelliteRenderer {
       LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,
     };
 
-    const obsInDark = observerPos ? isObserverInDark(observerPos, sunDir) : false;
-    const satPos = new THREE.Vector3();
+    const observerAvailable = observerPos !== null;
+    const obsX = observerPos?.x ?? 0;
+    const obsY = observerPos?.y ?? 0;
+    const obsZ = observerPos?.z ?? 0;
+    const obsLen = observerAvailable ? Math.sqrt(obsX * obsX + obsY * obsY + obsZ * obsZ) : 0;
+    const hasZenith = obsLen > 0;
+    const invObsLen = hasZenith ? (1 / obsLen) : 0;
+    const zenithX = obsX * invObsLen;
+    const zenithY = obsY * invObsLen;
+    const zenithZ = obsZ * invObsLen;
+    const sunX = sunDir.x;
+    const sunY = sunDir.y;
+    const sunZ = sunDir.z;
+    const obsInDark = observerAvailable && hasZenith
+      ? isObserverInDarkFromComponents(obsX, obsY, obsZ, sunX, sunY, sunZ)
+      : false;
     const hasVisualList = visualNoradIds.size > 0;
 
     for (let i = 0; i < count; i++) {
@@ -217,56 +241,85 @@ export class SatelliteRenderer {
 
         if (visibilityMode === 'visual') {
           // Fail-closed: visual mode requires curated NORAD membership + observer location.
-          if (!hasVisualList || !visualNoradIds.has(obj.noradId) || !observerPos) {
+          if (!hasVisualList || !observerAvailable || !hasZenith) {
             finalMult = 0.0;
           } else {
             const i3 = i * 3;
-            satPos.set(currArr[i3], currArr[i3 + 1], currArr[i3 + 2]);
-
-            const V = satPos.clone().sub(observerPos);
-            const vDist = V.length();
-            const zenith = observerPos.clone().normalize();
-            const sinElev = V.dot(zenith) / vDist;
-
-            if (sinElev < 0.1736) { // Below 10 degrees elevation
+            const satX = currArr[i3];
+            const satY = currArr[i3 + 1];
+            const satZ = currArr[i3 + 2];
+            const vx = satX - obsX;
+            const vy = satY - obsY;
+            const vz = satZ - obsZ;
+            const vDist = Math.sqrt((vx * vx) + (vy * vy) + (vz * vz));
+            if (vDist === 0) {
               finalMult = 0.0;
             } else {
-              // Hard 2000 km range cutoff — eliminates MEO/GEO/HEO clutter
+              const elevationSin = ((vx * zenithX) + (vy * zenithY) + (vz * zenithZ)) / vDist;
               const distKm = vDist * 6371;
-              if (distKm > 2000) {
-                finalMult = 0.0;
-              } else if (!obsInDark || isEclipsed(satPos, sunDir)) {
+              const visibility = evaluateVisualVisibility({
+                isCurated: visualNoradIds.has(obj.noradId),
+                elevationSin,
+                rangeKm: distKm,
+                observerDark: obsInDark,
+                satelliteEclipsed: isEclipsedFromComponents(satX, satY, satZ, sunX, sunY, sunZ),
+              });
+
+              if (!visibility.visible) {
                 finalMult = 0.0;
               } else {
-                finalMult *= getPhaseMultiplier(satPos, observerPos, sunDir) * 1.5;
+                finalMult *= getPhaseMultiplierFromComponents(
+                  satX,
+                  satY,
+                  satZ,
+                  obsX,
+                  obsY,
+                  obsZ,
+                  sunX,
+                  sunY,
+                  sunZ,
+                ) * 1.5;
               }
 
               // Fading cone: gradual falloff from 45° to 10° elevation
-              if (finalMult > 0.0 && sinElev < 0.707) {
-                finalMult *= Math.max(0.4, (sinElev - 0.1736) / (0.707 - 0.1736));
+              if (finalMult > 0.0 && elevationSin < VISUAL_FADING_START_SIN) {
+                finalMult *= Math.max(
+                  0.4,
+                  (elevationSin - VISUAL_ELEVATION_THRESHOLD_SIN)
+                  / (VISUAL_FADING_START_SIN - VISUAL_ELEVATION_THRESHOLD_SIN),
+                );
               }
             }
           }
-        } else if (visibilityMode === 'radio' && observerPos) {
+        } else if (visibilityMode === 'radio' && observerAvailable && hasZenith) {
           const i3 = i * 3;
-          satPos.set(currArr[i3], currArr[i3 + 1], currArr[i3 + 2]);
-
-          const V = satPos.clone().sub(observerPos);
-          const vDist = V.length();
-          const zenith = observerPos.clone().normalize();
-          const sinElev = V.dot(zenith) / vDist;
-
-          if (sinElev < 0.1736) { // Below 10 degrees elevation
+          const satX = currArr[i3];
+          const satY = currArr[i3 + 1];
+          const satZ = currArr[i3 + 2];
+          const vx = satX - obsX;
+          const vy = satY - obsY;
+          const vz = satZ - obsZ;
+          const vDist = Math.sqrt((vx * vx) + (vy * vy) + (vz * vz));
+          if (vDist === 0) {
             finalMult = 0.0;
           } else {
-            // Radio pass: RCS multiplier already in finalMult; apply range + mode scalar
-            const distKm = vDist * 6371;
-            const rangeScale = Math.max(0.3, Math.min(1.0, 2000 / distKm));
-            finalMult *= rangeScale * 0.6;
+            const elevationSin = ((vx * zenithX) + (vy * zenithY) + (vz * zenithZ)) / vDist;
+            if (elevationSin < VISUAL_ELEVATION_THRESHOLD_SIN) {
+              finalMult = 0.0;
+            } else {
+              // Radio pass: RCS multiplier already in finalMult; apply range + mode scalar
+              const distKm = vDist * 6371;
+              const rangeScale = Math.max(0.3, Math.min(1.0, VISUAL_RANGE_MAX_KM / distKm));
+              finalMult *= rangeScale * 0.6;
 
-            // Fading cone: gradual falloff from 45° to 10° elevation
-            if (finalMult > 0.0 && sinElev < 0.707) {
-              finalMult *= Math.max(0.4, (sinElev - 0.1736) / (0.707 - 0.1736));
+              // Fading cone: gradual falloff from 45° to 10° elevation
+              if (finalMult > 0.0 && elevationSin < VISUAL_FADING_START_SIN) {
+                finalMult *= Math.max(
+                  0.4,
+                  (elevationSin - VISUAL_ELEVATION_THRESHOLD_SIN)
+                  / (VISUAL_FADING_START_SIN - VISUAL_ELEVATION_THRESHOLD_SIN),
+                );
+              }
             }
           }
         }

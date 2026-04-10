@@ -203,6 +203,7 @@ export function InfoCard() {
   }
 
   const s = selectedSatellite!;
+  const autoVisualPredictedTrail = visibilityMode === 'visual' && observerLocation !== null;
   const passForSelected = visualPass.noradId === s.noradId ? visualPass : null;
   const passReadyMetrics = (() => {
     if (
@@ -329,20 +330,31 @@ export function InfoCard() {
           {cameraMode === 'following' ? 'Unfollow' : cameraMode === 'flying' ? 'Cancel' : cameraMode === 'returning' ? 'Stop' : 'Go to'}
         </button>
         <button
-          onClick={() => setShowOrbitTrail(!showOrbitTrail)}
+          onClick={() => {
+            if (!autoVisualPredictedTrail) {
+              setShowOrbitTrail(!showOrbitTrail);
+            }
+          }}
+          disabled={autoVisualPredictedTrail}
+          title={autoVisualPredictedTrail ? 'Predicted trail auto-renders in Naked Eye mode' : undefined}
           style={{
             flex: 1,
             padding: '6px 0',
-            background: showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)',
-            border: `1px solid ${showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)'}`,
+            background: autoVisualPredictedTrail
+              ? 'rgba(0, 229, 255, 0.15)'
+              : (showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)'),
+            border: `1px solid ${autoVisualPredictedTrail
+              ? 'rgba(0, 229, 255, 0.4)'
+              : (showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)')}`,
             borderRadius: 4,
-            color: showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+            color: autoVisualPredictedTrail ? '#00E5FF' : (showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)'),
             fontFamily: 'monospace',
             fontSize: '11px',
-            cursor: 'pointer',
+            cursor: autoVisualPredictedTrail ? 'default' : 'pointer',
+            opacity: autoVisualPredictedTrail ? 0.9 : 1,
           }}
         >
-          {showOrbitTrail ? 'Hide orbit' : 'Show orbit'}
+          {autoVisualPredictedTrail ? 'Predicted trail auto' : (showOrbitTrail ? 'Hide orbit' : 'Show orbit')}
         </button>
       </div>
     </div>

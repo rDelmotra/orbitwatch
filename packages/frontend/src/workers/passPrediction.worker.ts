@@ -16,6 +16,8 @@ self.onmessage = (event: MessageEvent<PassPredictionWorkerRequest>) => {
       line2: msg.line2,
       observer: msg.observer,
       nowMs: msg.nowMs,
+      isCurated: msg.isCurated,
+      mode: 'visual',
     });
 
     const response: PassPredictionWorkerResponse = {

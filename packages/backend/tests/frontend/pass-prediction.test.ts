@@ -38,6 +38,7 @@ describe('predictVisualPass', () => {
       line1: ISS_LINE1,
       line2: ISS_LINE2,
       observer: OBSERVER,
+      mode: 'geometry',
       nowMs: BASE_TIME_MS,
       elevationThresholdDeg: VISUAL_PASS_ELEVATION_THRESHOLD_DEG,
       predictionHorizonMs: 48 * 60 * 60 * 1000,
@@ -71,6 +72,7 @@ describe('predictVisualPass', () => {
       line1: ISS_LINE1,
       line2: ISS_LINE2,
       observer: OBSERVER,
+      mode: 'geometry',
       nowMs: BASE_TIME_MS,
       elevationThresholdDeg: VISUAL_PASS_ELEVATION_THRESHOLD_DEG,
       predictionHorizonMs: 48 * 60 * 60 * 1000,
@@ -102,13 +104,34 @@ describe('predictVisualPass', () => {
       line1: ISS_LINE1,
       line2: ISS_LINE2,
       observer: OBSERVER,
+      mode: 'geometry',
       nowMs: BASE_TIME_MS,
-      elevationThresholdDeg: 80,
-      predictionHorizonMs: 60_000,
-      sampleCadenceMs: 10_000,
+      predictionHorizonMs: 1_000,
+      sampleCadenceMs: 1_000,
       crossingToleranceMs: 200,
     });
 
     assert.equal(result.kind, 'no_pass');
+    if (result.kind === 'no_pass') {
+      assert.ok(
+        result.reason === 'no_geometry_pass'
+        || result.reason === 'outside_horizon',
+      );
+    }
+  });
+
+  it('returns explicit not_curated reason when object is outside curated list', () => {
+    const result = predictVisualPass({
+      line1: ISS_LINE1,
+      line2: ISS_LINE2,
+      observer: OBSERVER,
+      nowMs: BASE_TIME_MS,
+      isCurated: false,
+    });
+
+    assert.equal(result.kind, 'no_pass');
+    if (result.kind === 'no_pass') {
+      assert.equal(result.reason, 'not_curated');
+    }
   });
 });

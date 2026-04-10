@@ -99,6 +99,7 @@ const countStyle: React.CSSProperties = {
 };
 
 const OBSERVER_LOCATION_CACHE_KEY = 'orbitwatch:observerLocation:v1';
+const OBSERVER_LOCATION_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const LOCATION_RETRY_MAX_AGE_MS = 30 * 60 * 1000;
 
 interface ObserverLocationValue {
@@ -146,6 +147,18 @@ function cacheObserverLocation(location: ObserverLocationValue): void {
   }
 }
 
+function clearCachedObserverLocation(): void {
+  if (typeof localStorage === 'undefined') {
+    return;
+  }
+
+  try {
+    localStorage.removeItem(OBSERVER_LOCATION_CACHE_KEY);
+  } catch {
+    // Ignore local cache remove errors.
+  }
+}
+
 function readCachedObserverLocation(): ObserverLocationCacheEnvelope | null {
   if (typeof localStorage === 'undefined') {
     return null;
@@ -180,6 +193,14 @@ function readCachedObserverLocation(): ObserverLocationCacheEnvelope | null {
   } catch {
     return null;
   }
+}
+
+function formatAge(ms: number): string {
+  const totalMinutes = Math.max(1, Math.floor(ms / 60_000));
+  if (totalMinutes < 60) return `${totalMinutes} min`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 function getLocationErrorMessage(err: GeolocationPositionError): string {
@@ -236,7 +257,7 @@ export function FilterPanel() {
         ? 'VISUAL list: Loading'
         : 'VISUAL list: Unavailable';
 
-  const handleRequestLocation = async () => {
+  const handleRequestLocation = async (autoSwitchToLocalMode: boolean) => {
     if (isLocating) {
       return;
     }
@@ -272,16 +293,28 @@ export function FilterPanel() {
       const location = toObserverLocation(position);
       cacheObserverLocation(location);
       setObserverLocation(location);
-      setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
+      if (autoSwitchToLocalMode) {
+        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
+      }
       setLocationStatusMessage(null);
     } catch (err) {
       const cached = readCachedObserverLocation();
       if (cached) {
-        setObserverLocation({ lat: cached.lat, lon: cached.lon, alt: cached.alt });
-        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
-        setLocationStatusMessage(
-          `Live location unavailable; using last saved location (${new Date(cached.savedAt).toISOString().slice(11, 19)} UTC).`,
-        );
+        const cacheAgeMs = Date.now() - cached.savedAt;
+        if (cacheAgeMs <= OBSERVER_LOCATION_CACHE_MAX_AGE_MS) {
+          setObserverLocation({ lat: cached.lat, lon: cached.lon, alt: cached.alt });
+          if (autoSwitchToLocalMode) {
+            setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
+          }
+          setLocationStatusMessage(
+            `Live location unavailable; using saved location (${new Date(cached.savedAt).toISOString().slice(11, 19)} UTC).`,
+          );
+        } else {
+          clearCachedObserverLocation();
+          setLocationStatusMessage(
+            `Live location unavailable and saved location is stale (${formatAge(cacheAgeMs)} old); not applied.`,
+          );
+        }
       } else {
         if (err instanceof Error) {
           setLocationStatusMessage(`Unable to retrieve location: ${err.message}`);
@@ -359,9 +392,9 @@ export function FilterPanel() {
            {observerLocation === null ? (
                <>
                  <button
-                   onClick={() => void handleRequestLocation()}
-                   disabled={isLocating}
-                   style={{
+                    onClick={() => void handleRequestLocation(true)}
+                    disabled={isLocating}
+                    style={{
                      background: 'rgba(255, 255, 255, 0.1)',
                      border: '1px solid rgba(255, 255, 255, 0.2)',
                      color: '#fff',
@@ -386,10 +419,10 @@ export function FilterPanel() {
                    <div style={{ fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginBottom: 4 }}>
                      Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
                    </div>
-                   <button
-                     onClick={() => void handleRequestLocation()}
-                     disabled={isLocating}
-                     style={{
+                    <button
+                      onClick={() => void handleRequestLocation(false)}
+                      disabled={isLocating}
+                      style={{
                        alignSelf: 'flex-start',
                        background: 'rgba(255, 255, 255, 0.08)',
                        border: '1px solid rgba(255, 255, 255, 0.15)',

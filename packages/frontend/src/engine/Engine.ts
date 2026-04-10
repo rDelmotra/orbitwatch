@@ -32,7 +32,7 @@ const DSO_WORKER_RESTART_DELAY_MS = 500;
 const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const PASS_PREDICTION_REFRESH_INTERVAL_MS = 30_000;
-const VISUAL_CAMERA_SURFACE_OFFSET_ER = 0.003;
+const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 type DsoWorkerInMessage =
@@ -382,7 +382,7 @@ export class Engine {
             this.resetCamera();
           }
 
-          if (state.showOrbitTrail && (modeChanged || obsLocChanged)) {
+          if ((state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) && (modeChanged || obsLocChanged)) {
             this.refreshOrbitTrail(state);
           }
         }
@@ -550,7 +550,7 @@ export class Engine {
           durationMs: null,
           message: msg.message,
         });
-        if (state.showOrbitTrail) {
+        if (state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) {
           this.refreshOrbitTrail(state);
         }
         return;
@@ -570,7 +570,7 @@ export class Engine {
           durationMs: null,
           message: msg.result.message,
         });
-        if (state.showOrbitTrail) {
+        if (state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) {
           this.refreshOrbitTrail(state);
         }
         return;
@@ -592,14 +592,17 @@ export class Engine {
         durationMs: prediction.window.durationMs,
         message: null,
       });
-      if (state.showOrbitTrail) {
+      if (state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) {
         this.refreshOrbitTrail(state);
       }
     };
 
     this.passPredictionWorker.onerror = (event) => {
       console.error('Pass prediction worker error:', event);
-      useStore.getState().setVisualPassState({
+      const state = useStore.getState();
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
         status: 'unavailable',
         noradId: null,
         generatedAtMs: Date.now(),
@@ -610,6 +613,9 @@ export class Engine {
         durationMs: null,
         message: 'Pass prediction worker error.',
       });
+      if (state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state)) {
+        this.refreshOrbitTrail(state);
+      }
     };
   }
 
@@ -620,6 +626,7 @@ export class Engine {
     this.visualPassRequestId = requestId;
 
     const selectedIndex = state.selectedIndex;
+    const shouldRefreshTrail = state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state);
     if (
       state.visibilityMode !== 'visual'
       || selectedIndex === null
@@ -639,6 +646,9 @@ export class Engine {
         durationMs: null,
         message: null,
       });
+      if (state.showOrbitTrail) {
+        this.refreshOrbitTrail(state);
+      }
       return;
     }
 
@@ -657,7 +667,7 @@ export class Engine {
         durationMs: null,
         message: 'Observer location is required for pass prediction.',
       });
-      if (state.showOrbitTrail) {
+      if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
       return;
@@ -677,7 +687,7 @@ export class Engine {
         durationMs: null,
         message: 'Curated VISUAL list is unavailable.',
       });
-      if (state.showOrbitTrail) {
+      if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
       return;
@@ -697,27 +707,7 @@ export class Engine {
         durationMs: null,
         message: 'Loading curated VISUAL list.',
       });
-      if (state.showOrbitTrail) {
-        this.refreshOrbitTrail(state);
-      }
-      return;
-    }
-
-    if (!this.visualNoradIds.has(selected.noradId)) {
-      this.visualPassTrailNoradId = null;
-      this.visualPassTrailTeme = null;
-      state.setVisualPassState({
-        status: 'unavailable',
-        noradId: selected.noradId,
-        generatedAtMs: Date.now(),
-        aosTimeMs: null,
-        tcaTimeMs: null,
-        losTimeMs: null,
-        maxElevationDeg: null,
-        durationMs: null,
-        message: 'Selected object is not in curated naked-eye candidates.',
-      });
-      if (state.showOrbitTrail) {
+      if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
       return;
@@ -737,23 +727,35 @@ export class Engine {
         durationMs: null,
         message: 'Pass prediction worker is not available.',
       });
-      if (state.showOrbitTrail) {
+      if (shouldRefreshTrail) {
         this.refreshOrbitTrail(state);
       }
       return;
     }
 
-    state.setVisualPassState({
-      status: 'computing',
-      noradId: selected.noradId,
-      generatedAtMs: Date.now(),
-      aosTimeMs: null,
-      tcaTimeMs: null,
-      losTimeMs: null,
-      maxElevationDeg: null,
-      durationMs: null,
-      message: null,
-    });
+    const previousPass = state.visualPass;
+    const hasStablePassForSameSelection =
+      previousPass.noradId === selected.noradId
+      && (previousPass.status === 'ready' || previousPass.status === 'no_pass');
+
+    if (!hasStablePassForSameSelection) {
+      this.visualPassTrailNoradId = null;
+      this.visualPassTrailTeme = null;
+      state.setVisualPassState({
+        status: 'computing',
+        noradId: selected.noradId,
+        generatedAtMs: Date.now(),
+        aosTimeMs: null,
+        tcaTimeMs: null,
+        losTimeMs: null,
+        maxElevationDeg: null,
+        durationMs: null,
+        message: null,
+      });
+      if (shouldRefreshTrail) {
+        this.refreshOrbitTrail(state);
+      }
+    }
 
     const request: PassPredictionWorkerRequest = {
       type: 'PREDICT',
@@ -763,6 +765,7 @@ export class Engine {
       line2: selected.line2,
       observer: state.observerLocation,
       nowMs: Date.now(),
+      isCurated: this.visualNoradIds.has(selected.noradId),
     };
     this.passPredictionWorker.postMessage(request);
   }
@@ -812,7 +815,7 @@ export class Engine {
 
   private focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
     const { observerWorldPos, upDir } = this.getObserverSkyAnchor(loc);
-    const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
+    const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
     const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
 
     const store = useStore.getState();
@@ -833,17 +836,12 @@ export class Engine {
   private getObserverSkyAnchor(
     loc: { lat: number; lon: number; alt: number },
   ): { observerWorldPos: THREE.Vector3; upDir: THREE.Vector3 } {
-    if (this.observerMarker) {
-      const observerWorldPos = new THREE.Vector3();
-      const markerWorldQuat = new THREE.Quaternion();
-      this.observerMarker.getWorldPosition(observerWorldPos);
-      this.observerMarker.getWorldQuaternion(markerWorldQuat);
-      const upDir = new THREE.Vector3(0, 1, 0).applyQuaternion(markerWorldQuat).normalize();
-      return { observerWorldPos, upDir };
-    }
-
-    const observerLocalPos = getObserverECEFPosition(loc.lat, loc.lon);
-    const observerWorldPos = this.earthRenderer.object.localToWorld(observerLocalPos.clone());
+    const observerWorldPos = getObserverScenePosition(
+      loc.lat,
+      loc.lon,
+      loc.alt,
+      new Date(),
+    );
     const upDir = observerWorldPos.clone().normalize();
     return { observerWorldPos, upDir };
   }
@@ -1060,10 +1058,21 @@ export class Engine {
     } satisfies DsoWorkerInMessage);
   }
 
+  private shouldAutoRenderVisualPassTrail(
+    state: ReturnType<typeof useStore.getState> = useStore.getState(),
+  ): boolean {
+    return state.visibilityMode === 'visual'
+      && state.observerLocation !== null
+      && state.selectedIndex !== null
+      && state.selectedIndex >= 0
+      && state.selectedIndex < this.catalogData.length;
+  }
+
   private refreshOrbitTrail(
     state: ReturnType<typeof useStore.getState> = useStore.getState(),
   ): void {
-    if (!state.showOrbitTrail) {
+    const autoVisualTrail = this.shouldAutoRenderVisualPassTrail(state);
+    if (!state.showOrbitTrail && !autoVisualTrail) {
       this.orbitTrailRenderer.clear();
       return;
     }
@@ -1071,7 +1080,7 @@ export class Engine {
     const selectedIndex = state.selectedIndex;
     if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
       const sat = this.catalogData[selectedIndex];
-      const usePredictedVisualTrail = state.visibilityMode === 'visual' && state.observerLocation !== null;
+      const usePredictedVisualTrail = autoVisualTrail;
       if (usePredictedVisualTrail) {
         const trail = this.visualPassTrailTeme;
         const hasReadyTrail = state.visualPass.status === 'ready'
@@ -1163,7 +1172,7 @@ export class Engine {
       // and facing up, so the view remains correct as Earth rotates.
       if (store.visibilityMode === 'visual' && store.observerLocation) {
         const { observerWorldPos, upDir } = this.getObserverSkyAnchor(store.observerLocation);
-        const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
+        const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
         const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
         this.camera.position.copy(camPos);
         this.controls.target.copy(lookTarget);
@@ -1536,7 +1545,7 @@ export class Engine {
         wireframe.renderOrder = 1;
         this.observerMarker.add(wireframe);
       }
-      const pos = getObserverECEFPosition(loc.lat, loc.lon);
+      const pos = getObserverECEFPosition(loc.lat, loc.lon, loc.alt);
       this.observerMarker.position.copy(pos);
 
       // Orient to surface normal

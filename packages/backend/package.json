@@ -11,8 +11,8 @@
     "dso-worker:start": "node dist/dso-worker.js",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --experimental-transform-types --no-warnings --test tests/**/*.test.ts",
-    "test:golden": "node --experimental-strip-types --experimental-transform-types --no-warnings --test tests/dso/normalize/convert.test.ts"
+    "test": "tsx --test tests/**/*.test.ts",
+    "test:golden": "tsx --test tests/dso/normalize/convert.test.ts"
   },
   "dependencies": {
     "axios": "^1.7.0",
