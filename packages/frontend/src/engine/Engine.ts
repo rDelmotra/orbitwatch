@@ -495,11 +495,7 @@ export class Engine {
   }
 
   private focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
-    // Anchor to the same Earth-local geolocation point used by the observer marker,
-    // then transform to world space so camera placement exactly matches the location.
-    const observerLocalPos = getObserverECEFPosition(loc.lat, loc.lon);
-    const observerWorldPos = this.earthRenderer.object.localToWorld(observerLocalPos.clone());
-    const upDir = observerWorldPos.clone().normalize();
+    const { observerWorldPos, upDir } = this.getObserverSkyAnchor(loc);
     const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
     const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
 
@@ -516,6 +512,24 @@ export class Engine {
     this.controls.target.copy(lookTarget);
     this.camera.lookAt(lookTarget);
     this.controls.update();
+  }
+
+  private getObserverSkyAnchor(
+    loc: { lat: number; lon: number; alt: number },
+  ): { observerWorldPos: THREE.Vector3; upDir: THREE.Vector3 } {
+    if (this.observerMarker) {
+      const observerWorldPos = new THREE.Vector3();
+      const markerWorldQuat = new THREE.Quaternion();
+      this.observerMarker.getWorldPosition(observerWorldPos);
+      this.observerMarker.getWorldQuaternion(markerWorldQuat);
+      const upDir = new THREE.Vector3(0, 1, 0).applyQuaternion(markerWorldQuat).normalize();
+      return { observerWorldPos, upDir };
+    }
+
+    const observerLocalPos = getObserverECEFPosition(loc.lat, loc.lon);
+    const observerWorldPos = this.earthRenderer.object.localToWorld(observerLocalPos.clone());
+    const upDir = observerWorldPos.clone().normalize();
+    return { observerWorldPos, upDir };
   }
 
   private applyVisualListResult(result: VisualListResolvedResult): void {
@@ -812,7 +826,18 @@ export class Engine {
     const selectedDso = store.selectedDso;
 
     if (cameraMode === 'free') {
-      this.controls.update();
+      // Observer sky camera (visual mode): keep camera pinned to geolocation
+      // and facing up, so the view remains correct as Earth rotates.
+      if (store.visibilityMode === 'visual' && store.observerLocation) {
+        const { observerWorldPos, upDir } = this.getObserverSkyAnchor(store.observerLocation);
+        const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_SURFACE_OFFSET_ER);
+        const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
+        this.camera.position.copy(camPos);
+        this.controls.target.copy(lookTarget);
+        this.camera.lookAt(lookTarget);
+      } else {
+        this.controls.update();
+      }
 
     } else if (cameraMode === 'flying' && selectedIdx !== null) {
       // TLE fly-to
