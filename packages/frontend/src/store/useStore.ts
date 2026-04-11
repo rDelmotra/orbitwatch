@@ -6,6 +6,7 @@ import type { DsoLabelPosition } from '../engine/DsoRenderer';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
+export type TrackingStyle = 'follow' | 'joyride';
 export type VisibilityMode = 'all' | 'radio' | 'visual';
 
 export interface VisualListState {
@@ -36,6 +37,7 @@ interface AppState {
   loadingPhase: LoadingPhase;
   loadingError: string | null;
   cameraMode: CameraMode;
+  trackingStyle: TrackingStyle;
   objectCount: number;
   categoryCounts: Record<ObjectCategory, number>;
   dataVersion: string | null;
@@ -44,6 +46,7 @@ interface AppState {
   catalogData: EnrichedTLEObject[];
   selectByIndex: ((index: number) => void) | null;
   triggerFlyTo: ((index: number) => void) | null;
+  triggerJoyride: ((index: number) => void) | null;
   triggerResetCamera: (() => void) | null;
 
   selectedIndex: number | null;
@@ -58,6 +61,7 @@ interface AppState {
   selectedDso: DsoObject | null;
   dsoLabelPositions: DsoLabelPosition[];
   triggerFlyToDso: ((dsoId: string) => void) | null;
+  triggerJoyrideDso: ((dsoId: string) => void) | null;
 
   hoveredName: string | null;
   hoverScreenX: number;
@@ -79,7 +83,9 @@ interface AppState {
   visibleRegimeCounts: Record<OrbitalRegime, number>;
 
   setCameraMode: (mode: CameraMode) => void;
+  setTrackingStyle: (style: TrackingStyle) => void;
   setTriggerFlyTo: (fn: (index: number) => void) => void;
+  setTriggerJoyride: (fn: (index: number) => void) => void;
   setTriggerResetCamera: (fn: () => void) => void;
   setLoadingPhase: (phase: LoadingPhase) => void;
   setLoadingError: (error: string) => void;
@@ -118,12 +124,14 @@ interface AppState {
   clearDsoEphemeris: (dsoId: string) => void;
   setDsoLabelPositions: (positions: DsoLabelPosition[]) => void;
   setTriggerFlyToDso: (fn: (dsoId: string) => void) => void;
+  setTriggerJoyrideDso: (fn: (dsoId: string) => void) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
   loadingPhase: 'fetching',
   loadingError: null,
   cameraMode: 'free',
+  trackingStyle: 'follow',
   objectCount: 0,
   categoryCounts: {
     active_satellite: 0,
@@ -139,6 +147,7 @@ export const useStore = create<AppState>((set) => ({
   catalogData: [],
   selectByIndex: null,
   triggerFlyTo: null,
+  triggerJoyride: null,
   triggerResetCamera: null,
 
   selectedIndex: null,
@@ -152,6 +161,7 @@ export const useStore = create<AppState>((set) => ({
   selectedDso: null,
   dsoLabelPositions: [],
   triggerFlyToDso: null,
+  triggerJoyrideDso: null,
 
   hoveredName: null,
   hoverScreenX: 0,
@@ -205,7 +215,9 @@ export const useStore = create<AppState>((set) => ({
   visibleRegimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
 
   setCameraMode: (mode) => set({ cameraMode: mode }),
+  setTrackingStyle: (style) => set({ trackingStyle: style }),
   setTriggerFlyTo: (fn) => set({ triggerFlyTo: fn }),
+  setTriggerJoyride: (fn) => set({ triggerJoyride: fn }),
   setTriggerResetCamera: (fn) => set({ triggerResetCamera: fn }),
   setLoadingPhase: (phase) => set({ loadingPhase: phase }),
   setLoadingError: (error) => set({ loadingError: error }),
@@ -305,6 +317,7 @@ export const useStore = create<AppState>((set) => ({
     }),
   setDsoLabelPositions: (positions) => set({ dsoLabelPositions: positions }),
   setTriggerFlyToDso: (fn) => set({ triggerFlyToDso: fn }),
+  setTriggerJoyrideDso: (fn) => set({ triggerJoyrideDso: fn }),
 }));
 
 /** Selector: currently selected object as a TrackedObject, or null. */

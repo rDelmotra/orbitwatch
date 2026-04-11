@@ -29,8 +29,10 @@ type WorkerOutMessage =
     | {
         type: 'POSITIONS';
         positions: Float32Array;
+        velocities: Float32Array;
         validFlags: Uint8Array;
         startIndex: number;
+        timestamp: number;
     };
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -43,17 +45,19 @@ let objectCount = 0;
 
 // Double-buffered output arrays. After a Transferable transfer the buffer is
 // detached (length 0), so we keep two sets and alternate.
-let bufferSetA: { positions: Float32Array; validFlags: Uint8Array } | null = null;
-let bufferSetB: { positions: Float32Array; validFlags: Uint8Array } | null = null;
+let bufferSetA: { positions: Float32Array; velocities: Float32Array; validFlags: Uint8Array } | null = null;
+let bufferSetB: { positions: Float32Array; velocities: Float32Array; validFlags: Uint8Array } | null = null;
 let useSetA = true;
 
 function allocateBuffers(count: number): void {
     bufferSetA = {
         positions: new Float32Array(count * 3),
+        velocities: new Float32Array(count * 3),
         validFlags: new Uint8Array(count),
     };
     bufferSetB = {
         positions: new Float32Array(count * 3),
+        velocities: new Float32Array(count * 3),
         validFlags: new Uint8Array(count),
     };
 }
@@ -63,12 +67,13 @@ function allocateBuffers(count: number): void {
  * If the active set was detached by a previous transfer, reallocate it
  * and swap to the other set for next time.
  */
-function getActiveBuffers(): { positions: Float32Array; validFlags: Uint8Array } {
+function getActiveBuffers(): { positions: Float32Array; velocities: Float32Array; validFlags: Uint8Array } {
     if (useSetA) {
         // If buffer A was detached by a previous Transferable transfer, reallocate
         if (!bufferSetA || bufferSetA.positions.buffer.byteLength === 0) {
             bufferSetA = {
                 positions: new Float32Array(objectCount * 3),
+                velocities: new Float32Array(objectCount * 3),
                 validFlags: new Uint8Array(objectCount),
             };
         }
@@ -78,6 +83,7 @@ function getActiveBuffers(): { positions: Float32Array; validFlags: Uint8Array }
         if (!bufferSetB || bufferSetB.positions.buffer.byteLength === 0) {
             bufferSetB = {
                 positions: new Float32Array(objectCount * 3),
+                velocities: new Float32Array(objectCount * 3),
                 validFlags: new Uint8Array(objectCount),
             };
         }
@@ -128,7 +134,7 @@ function handleInit(tles: TLEInput[], start: number): void {
 function handlePropagate(timestamp: number): void {
     const date = new Date(timestamp);
 
-    const { positions, validFlags } = getActiveBuffers();
+    const { positions, velocities, validFlags } = getActiveBuffers();
 
     for (let i = 0; i < objectCount; i++) {
         const rec = satrecs[i];
@@ -138,18 +144,25 @@ function handlePropagate(timestamp: number): void {
             positions[i * 3] = 0;
             positions[i * 3 + 1] = 0;
             positions[i * 3 + 2] = 0;
+            velocities[i * 3] = 0;
+            velocities[i * 3 + 1] = 0;
+            velocities[i * 3 + 2] = 0;
             validFlags[i] = 0;
             continue;
         }
 
         const result = satellite.propagate(rec, date);
         const posEci = result?.position;
+        const velEci = result?.velocity;
 
         // propagate returns { position: false } on failure
-        if (!posEci || typeof posEci === 'boolean') {
+        if (!posEci || typeof posEci === 'boolean' || !velEci || typeof velEci === 'boolean') {
             positions[i * 3] = 0;
             positions[i * 3 + 1] = 0;
             positions[i * 3 + 2] = 0;
+            velocities[i * 3] = 0;
+            velocities[i * 3 + 1] = 0;
+            velocities[i * 3 + 2] = 0;
             validFlags[i] = 0;
             continue;
         }
@@ -158,6 +171,9 @@ function handlePropagate(timestamp: number): void {
         positions[i * 3] = posEci.x / EARTH_RADIUS_KM;
         positions[i * 3 + 1] = posEci.y / EARTH_RADIUS_KM;
         positions[i * 3 + 2] = posEci.z / EARTH_RADIUS_KM;
+        velocities[i * 3] = velEci.x / EARTH_RADIUS_KM;
+        velocities[i * 3 + 1] = velEci.y / EARTH_RADIUS_KM;
+        velocities[i * 3 + 2] = velEci.z / EARTH_RADIUS_KM;
         validFlags[i] = 1;
     }
 
@@ -167,12 +183,15 @@ function handlePropagate(timestamp: number): void {
     const reply: WorkerOutMessage = {
         type: 'POSITIONS',
         positions,
+        velocities,
         validFlags,
         startIndex,
+        timestamp,
     };
 
     (self as unknown as Worker).postMessage(reply, [
         positions.buffer,
+        velocities.buffer,
         validFlags.buffer,
     ]);
 }

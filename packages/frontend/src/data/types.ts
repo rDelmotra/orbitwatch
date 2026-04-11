@@ -31,4 +31,11 @@ export type WorkerInMessage =
 
 export type WorkerOutMessage =
     | { type: 'READY'; objectCount: number }
-    | { type: 'POSITIONS'; positions: Float32Array; validFlags: Uint8Array; startIndex: number }
+    | {
+      type: 'POSITIONS';
+      positions: Float32Array;
+      velocities: Float32Array;
+      validFlags: Uint8Array;
+      startIndex: number;
+      timestamp: number;
+    }

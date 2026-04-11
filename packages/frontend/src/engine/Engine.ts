@@ -16,7 +16,7 @@ import {
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
 import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
-import { useStore } from '../store/useStore';
+import { useStore, type TrackingStyle } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
 import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
@@ -49,7 +49,12 @@ type DsoWorkerInMessage =
   | { type: 'BUILD_TRAIL'; dsoId: string; pointCount?: number };
 
 type DsoWorkerOutMessage =
-  | { type: 'POSITIONS'; positions: Float32Array; visibleFlags: Uint8Array }
+  | {
+    type: 'POSITIONS';
+    positions: Float32Array;
+    velocities: Float32Array;
+    visibleFlags: Uint8Array;
+  }
   | { type: 'TRAIL'; dsoId: string; positions: Float32Array };
 
 export class Engine {
@@ -78,6 +83,7 @@ export class Engine {
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
   private pointerDownPos: { x: number; y: number } | null = null;
+  private joyrideLookPointerPos: { x: number; y: number } | null = null;
   private lastHoverTime = 0;
   private static readonly HOVER_THROTTLE_MS = 100;
   private orbitTrailRenderer: OrbitTrailRenderer;
@@ -103,6 +109,14 @@ export class Engine {
   private visualPassTrailNoradId: number | null = null;
   private visualPassUnsub: (() => void) | null = null;
   private observerMarker: THREE.Group | null = null;
+  private lastPropagationTimestampMs = 0;
+  private prevTleVelocitiesTeme: Float32Array | null = null;
+  private currTleVelocitiesTeme: Float32Array | null = null;
+  private dsoVelocitiesTeme: Float32Array | null = null;
+  private readonly trackingRadialDir = new THREE.Vector3();
+  private readonly trackingEndCamPos = new THREE.Vector3();
+  private readonly joyrideEntryTarget = new THREE.Vector3();
+  private readonly trackingVelocity = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -164,7 +178,9 @@ export class Engine {
       // Any transition to 'free': cancel animation, re-enable controls
       if (state.cameraMode === 'free') {
         this.cameraController.cancel();
+        this.cameraController.resetJoyrideState();
         this.controls.enabled = true;
+        this.joyrideLookPointerPos = null;
         this.arrivalTime = -1;
 
         if (this.dragExitedFollowing) {
@@ -178,7 +194,9 @@ export class Engine {
       // Entering 'returning': disable controls and start return animation
       if (state.cameraMode === 'returning') {
         this.cameraController.cancel();
+        this.cameraController.resetJoyrideState();
         this.controls.enabled = false;
+        this.joyrideLookPointerPos = null;
         this.arrivalTime = -1;
 
         this.cameraController.returnToHome(this.controls.target);
@@ -287,8 +305,10 @@ export class Engine {
       useStore.getState().setCatalogData(catalogData);
       useStore.getState().setSelectByIndex((index: number) => this.selectByIndex(index));
       useStore.getState().setTriggerFlyTo((index: number) => this.flyToSatellite(index));
+      useStore.getState().setTriggerJoyride((index: number) => this.joyrideSatellite(index));
       useStore.getState().setTriggerResetCamera(() => this.resetCamera());
       useStore.getState().setTriggerFlyToDso((dsoId: string) => this.flyToDso(dsoId));
+      useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.joyrideDso(dsoId));
 
       this.satelliteRenderer.initFromCatalog(catalogData);
 
@@ -455,6 +475,7 @@ export class Engine {
           const state = useStore.getState();
           const observerPos = this.getObserverScenePositionForState(state);
           const sunDir = getSunDirection(new Date());
+          this.updateTleVelocityBuffers(msg.velocities);
 
           const counts = this.satelliteRenderer.updatePositions(
             msg.positions,
@@ -471,8 +492,16 @@ export class Engine {
 
           useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
+          this.lastPropagationTimestampMs = msg.timestamp;
           this.lastTickTime = performance.now();
           this.satelliteRenderer.material.uniforms.uT.value = 0.0;
+
+          if (
+            (state.showOrbitTrail || this.shouldAutoRenderVisualPassTrail(state))
+            && state.selectedIndex !== null
+          ) {
+            this.refreshOrbitTrail(state);
+          }
 
           this.devValidation?.runChecks(msg.positions, msg.validFlags, this.objectCount);
 
@@ -911,6 +940,7 @@ export class Engine {
     this.dsoWorker?.terminate();
     this.dsoWorkerTickInFlight = false;
     this.dsoWorkerLastTickSentAt = 0;
+    this.dsoVelocitiesTeme = null;
     this.dsoWorkerKnownIds.clear();
     this.dsoWorkerKnownSnapshotVersions.clear();
 
@@ -924,6 +954,7 @@ export class Engine {
       if (msg.type === 'POSITIONS') {
         this.dsoWorkerTickInFlight = false;
         this.dsoWorkerLastTickSentAt = 0;
+        this.dsoVelocitiesTeme = msg.velocities;
         this.dsoRenderer.updateFromWorkerBuffers(msg.positions, msg.visibleFlags);
         return;
       }
@@ -1096,7 +1127,11 @@ export class Engine {
         return;
       }
 
-      this.orbitTrailRenderer.generate(sat.line1, sat.line2);
+      this.orbitTrailRenderer.generate(
+        sat.line1,
+        sat.line2,
+        this.getCurrentPropagationTimestampMs(),
+      );
       return;
     }
 
@@ -1106,6 +1141,90 @@ export class Engine {
     }
 
     this.orbitTrailRenderer.clear();
+  }
+
+  private updateTleVelocityBuffers(velocities: Float32Array): void {
+    if (this.currTleVelocitiesTeme === null || this.prevTleVelocitiesTeme === null) {
+      this.currTleVelocitiesTeme = new Float32Array(velocities.length);
+      this.prevTleVelocitiesTeme = new Float32Array(velocities.length);
+      this.currTleVelocitiesTeme.set(velocities);
+      this.prevTleVelocitiesTeme.set(velocities);
+      return;
+    }
+
+    if (
+      this.currTleVelocitiesTeme.length !== velocities.length
+      || this.prevTleVelocitiesTeme.length !== velocities.length
+    ) {
+      this.currTleVelocitiesTeme = new Float32Array(velocities.length);
+      this.prevTleVelocitiesTeme = new Float32Array(velocities.length);
+      this.currTleVelocitiesTeme.set(velocities);
+      this.prevTleVelocitiesTeme.set(velocities);
+      return;
+    }
+
+    this.prevTleVelocitiesTeme.set(this.currTleVelocitiesTeme);
+    this.currTleVelocitiesTeme.set(velocities);
+  }
+
+  private getCurrentPropagationTimestampMs(): number {
+    if (this.lastPropagationTimestampMs <= 0 || this.lastTickTime <= 0) {
+      return Date.now();
+    }
+
+    const elapsedMs = Math.min(
+      Math.max(performance.now() - this.lastTickTime, 0),
+      1000,
+    );
+    return this.lastPropagationTimestampMs + elapsedMs;
+  }
+
+  private getInterpolatedTleVelocity(index: number, t: number, out: THREE.Vector3): THREE.Vector3 {
+    if (
+      this.prevTleVelocitiesTeme === null
+      || this.currTleVelocitiesTeme === null
+      || index < 0
+    ) {
+      out.set(0, 0, 0);
+      return out;
+    }
+
+    const i3 = index * 3;
+    if (i3 + 2 >= this.currTleVelocitiesTeme.length || i3 + 2 >= this.prevTleVelocitiesTeme.length) {
+      out.set(0, 0, 0);
+      return out;
+    }
+
+    const vx = this.prevTleVelocitiesTeme[i3]
+      + (this.currTleVelocitiesTeme[i3] - this.prevTleVelocitiesTeme[i3]) * t;
+    const vy = this.prevTleVelocitiesTeme[i3 + 1]
+      + (this.currTleVelocitiesTeme[i3 + 1] - this.prevTleVelocitiesTeme[i3 + 1]) * t;
+    const vz = this.prevTleVelocitiesTeme[i3 + 2]
+      + (this.currTleVelocitiesTeme[i3 + 2] - this.prevTleVelocitiesTeme[i3 + 2]) * t;
+
+    // TEME -> Three.js axis swap (x, z, -y)
+    out.set(vx, vz, -vy);
+    return out;
+  }
+
+  private getDsoVelocity(dsoIndex: number, out: THREE.Vector3): THREE.Vector3 {
+    if (this.dsoVelocitiesTeme === null || dsoIndex < 0) {
+      out.set(0, 0, 0);
+      return out;
+    }
+
+    const i3 = dsoIndex * 3;
+    if (i3 + 2 >= this.dsoVelocitiesTeme.length) {
+      out.set(0, 0, 0);
+      return out;
+    }
+
+    const vx = this.dsoVelocitiesTeme[i3];
+    const vy = this.dsoVelocitiesTeme[i3 + 1];
+    const vz = this.dsoVelocitiesTeme[i3 + 2];
+    // TEME -> Three.js axis swap (x, z, -y)
+    out.set(vx, vz, -vy);
+    return out;
   }
 
   start(): void {
@@ -1164,6 +1283,7 @@ export class Engine {
 
     // ── Camera mode handling ─────────────────────────────────────────────────
     const cameraMode = store.cameraMode;
+    const trackingStyle = store.trackingStyle;
     const selectedIdx = store.selectedIndex;
     const selectedDso = store.selectedDso;
 
@@ -1184,11 +1304,23 @@ export class Engine {
     } else if (cameraMode === 'flying' && selectedIdx !== null) {
       // TLE fly-to
       const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      const radialDir = satPos.clone().normalize();
-      const endCamPos = satPos.clone().add(
-        radialDir.multiplyScalar(this.cameraController.followOffsetDist),
-      );
-      const done = this.cameraController.updateAnim(endCamPos, satPos, this.controls.target);
+      let endCamPos: THREE.Vector3;
+      let endTarget: THREE.Vector3;
+      if (trackingStyle === 'joyride') {
+        this.getInterpolatedTleVelocity(selectedIdx, uT, this.trackingVelocity);
+        endCamPos = satPos;
+        this.cameraController.getJoyrideEntryTarget(satPos, this.trackingVelocity, this.joyrideEntryTarget);
+        endTarget = this.joyrideEntryTarget;
+      } else {
+        this.trackingRadialDir.copy(satPos).normalize();
+        this.trackingEndCamPos.copy(satPos).addScaledVector(
+          this.trackingRadialDir,
+          this.cameraController.followOffsetDist,
+        );
+        endCamPos = this.trackingEndCamPos;
+        endTarget = satPos;
+      }
+      const done = this.cameraController.updateAnim(endCamPos, endTarget, this.controls.target);
       if (done) {
         store.setCameraMode('following');
         this.arrivalTime = performance.now();
@@ -1199,11 +1331,23 @@ export class Engine {
       const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
       if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
         const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
-        const radialDir = dsoPos.clone().normalize();
-        const endCamPos = dsoPos.clone().add(
-          radialDir.multiplyScalar(this.cameraController.followOffsetDist),
-        );
-        const done = this.cameraController.updateAnim(endCamPos, dsoPos, this.controls.target);
+        let endCamPos: THREE.Vector3;
+        let endTarget: THREE.Vector3;
+        if (trackingStyle === 'joyride') {
+          this.getDsoVelocity(dsoIndex, this.trackingVelocity);
+          endCamPos = dsoPos;
+          this.cameraController.getJoyrideEntryTarget(dsoPos, this.trackingVelocity, this.joyrideEntryTarget);
+          endTarget = this.joyrideEntryTarget;
+        } else {
+          this.trackingRadialDir.copy(dsoPos).normalize();
+          this.trackingEndCamPos.copy(dsoPos).addScaledVector(
+            this.trackingRadialDir,
+            this.cameraController.followOffsetDist,
+          );
+          endCamPos = this.trackingEndCamPos;
+          endTarget = dsoPos;
+        }
+        const done = this.cameraController.updateAnim(endCamPos, endTarget, this.controls.target);
         if (done) {
           store.setCameraMode('following');
           this.arrivalTime = performance.now();
@@ -1216,14 +1360,24 @@ export class Engine {
     } else if (cameraMode === 'following' && selectedIdx !== null) {
       // TLE follow
       const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      this.cameraController.updateFollow(satPos, this.controls.target);
+      if (trackingStyle === 'joyride') {
+        this.getInterpolatedTleVelocity(selectedIdx, uT, this.trackingVelocity);
+        this.cameraController.updateJoyride(satPos, this.trackingVelocity, this.controls.target);
+      } else {
+        this.cameraController.updateFollow(satPos, this.controls.target);
+      }
 
     } else if (cameraMode === 'following' && selectedDso !== null) {
       // DSO follow
       const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
       if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
         const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
-        this.cameraController.updateFollow(dsoPos, this.controls.target);
+        if (trackingStyle === 'joyride') {
+          this.getDsoVelocity(dsoIndex, this.trackingVelocity);
+          this.cameraController.updateJoyride(dsoPos, this.trackingVelocity, this.controls.target);
+        } else {
+          this.cameraController.updateFollow(dsoPos, this.controls.target);
+        }
       }
 
     } else if (cameraMode === 'returning') {
@@ -1257,6 +1411,7 @@ export class Engine {
       this.camera.position.length(),
       this.renderer.getPixelRatio(),
     );
+    this.orbitTrailRenderer.setJoyrideMode(cameraMode === 'following' && trackingStyle === 'joyride');
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -1270,7 +1425,24 @@ export class Engine {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
-    const mode = useStore.getState().cameraMode;
+    const state = useStore.getState();
+    const mode = state.cameraMode;
+    const isJoyrideFreeLook = mode === 'following' && state.trackingStyle === 'joyride';
+
+    if (this.joyrideLookPointerPos) {
+      if (!isJoyrideFreeLook) {
+        this.joyrideLookPointerPos = null;
+      } else {
+        const dx = e.clientX - this.joyrideLookPointerPos.x;
+        const dy = e.clientY - this.joyrideLookPointerPos.y;
+        this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
+        if (dx !== 0 || dy !== 0) {
+          this.cameraController.addJoyrideLookInput(-dx * 0.003, -dy * 0.0025);
+        }
+        return;
+      }
+    }
+
     if (this.pointerDownPos && mode !== 'free') {
       const dx = e.clientX - this.pointerDownPos.x;
       const dy = e.clientY - this.pointerDownPos.y;
@@ -1333,10 +1505,21 @@ export class Engine {
   };
 
   private onPointerDown = (e: PointerEvent): void => {
+    const state = useStore.getState();
+    if (state.cameraMode === 'following' && state.trackingStyle === 'joyride') {
+      this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
+      return;
+    }
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    if (this.joyrideLookPointerPos) {
+      this.joyrideLookPointerPos = null;
+      this.pointerDownPos = null;
+      return;
+    }
+
     if (!this.pointerDownPos || !this.gpuPicker) return;
 
     const dx = e.clientX - this.pointerDownPos.x;
@@ -1431,6 +1614,9 @@ export class Engine {
       store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
       const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
       const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
+      if (store.trackingStyle === 'joyride') {
+        this.cameraController.resetJoyrideState();
+      }
       this.arrivalTime = -1;
       this.cameraController.flyTo(satPos, this.controls.target);
       store.setCameraMode('flying');
@@ -1456,41 +1642,69 @@ export class Engine {
     store.setSelectedDso(dso);
   }
 
-  flyToSatellite(index: number): void {
+  flyToSatellite(index: number, style: TrackingStyle = 'follow'): void {
     if (index < 0 || index >= this.catalogData.length || !this.firstPositionReceived) return;
 
-    const store = useStore.getState();
+    let store = useStore.getState();
     if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
-      && store.selectedIndex === index) return;
+      && store.selectedIndex === index
+      && store.trackingStyle === style) return;
 
     if (store.selectedIndex !== index) {
       this.selectByIndex(index);
     }
 
+    store = useStore.getState();
+    if (store.selectedIndex !== index) return;
+    if (store.trackingStyle !== style) {
+      store.setTrackingStyle(style);
+    }
+
     const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
     const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
 
+    if (style === 'joyride') {
+      this.cameraController.resetJoyrideState();
+    }
     this.arrivalTime = -1;
     this.cameraController.flyTo(satPos, this.controls.target);
     store.setCameraMode('flying');
   }
 
-  flyToDso(dsoId: string): void {
-    const store = useStore.getState();
+  joyrideSatellite(index: number): void {
+    this.flyToSatellite(index, 'joyride');
+  }
+
+  flyToDso(dsoId: string, style: TrackingStyle = 'follow'): void {
+    let store = useStore.getState();
     const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === dsoId);
     if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return;
 
     if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
-      && store.selectedDso?.dsoId === dsoId) return;
+      && store.selectedDso?.dsoId === dsoId
+      && store.trackingStyle === style) return;
 
     if (store.selectedDso?.dsoId !== dsoId) {
       store.setSelectedDso(store.dsoObjects[dsoIndex]);
     }
 
+    store = useStore.getState();
+    if (store.selectedDso?.dsoId !== dsoId) return;
+    if (store.trackingStyle !== style) {
+      store.setTrackingStyle(style);
+    }
+
     const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
+    if (style === 'joyride') {
+      this.cameraController.resetJoyrideState();
+    }
     this.arrivalTime = -1;
     this.cameraController.flyTo(dsoPos, this.controls.target);
     store.setCameraMode('flying');
+  }
+
+  joyrideDso(dsoId: string): void {
+    this.flyToDso(dsoId, 'joyride');
   }
 
   resetCamera(): void {
@@ -1605,8 +1819,13 @@ export class Engine {
     this.worker?.terminate();
     this.dsoWorker?.terminate();
     this.passPredictionWorker?.terminate();
+    this.joyrideLookPointerPos = null;
     this.dsoWorkerTickInFlight = false;
     this.dsoWorkerLastTickSentAt = 0;
+    this.lastPropagationTimestampMs = 0;
+    this.prevTleVelocitiesTeme = null;
+    this.currTleVelocitiesTeme = null;
+    this.dsoVelocitiesTeme = null;
     this.dsoWorkerKnownIds.clear();
     this.dsoWorkerKnownSnapshotVersions.clear();
     if (this.dsoWorkerRestartTimer !== null) {

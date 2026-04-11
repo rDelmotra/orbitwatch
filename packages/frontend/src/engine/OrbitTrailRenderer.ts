@@ -21,6 +21,7 @@ const TRAIL_VERT = `
 
 const TRAIL_FRAG = `
   uniform vec3 uColor;
+  uniform float uOpacity;
   void main() {
     // gl_PointCoord (0,0 to 1,1) circle calculation
     float dist = length(gl_PointCoord - vec2(0.5));
@@ -30,7 +31,7 @@ const TRAIL_FRAG = `
     float alpha = 1.0 - smoothstep(0.1, 0.5, dist);
     
     // Additive glow factor
-    gl_FragColor = vec4(uColor, alpha * 0.4);
+    gl_FragColor = vec4(uColor, alpha * uOpacity);
   }
 `;
 
@@ -41,6 +42,7 @@ export class OrbitTrailRenderer {
   private geometry: THREE.BufferGeometry | null = null;
   private lineMaterial: THREE.LineBasicMaterial | null = null;
   private glowMaterial: THREE.ShaderMaterial | null = null;
+  private joyrideMode = false;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -53,7 +55,7 @@ export class OrbitTrailRenderer {
     this.lineMaterial = new THREE.LineBasicMaterial({
       color: 0x00E5FF,
       transparent: true,
-      opacity: 0.6,
+      opacity: this.joyrideMode ? 0.42 : 0.6,
     });
     this.line = closeLoop
       ? new THREE.LineLoop(this.geometry, this.lineMaterial)
@@ -64,7 +66,8 @@ export class OrbitTrailRenderer {
       uniforms: {
         uColor: { value: new THREE.Color(0x00E5FF) },
         uPixelRatio: { value: window.devicePixelRatio },
-        uPointSize: { value: 6.0 },
+        uPointSize: { value: this.joyrideMode ? 3.8 : 6.0 },
+        uOpacity: { value: this.joyrideMode ? 0.18 : 0.4 },
       },
       vertexShader: TRAIL_VERT,
       fragmentShader: TRAIL_FRAG,
@@ -79,7 +82,21 @@ export class OrbitTrailRenderer {
     this.scene.add(this.glow);
   }
 
-  generate(line1: string, line2: string): void {
+  setJoyrideMode(enabled: boolean): void {
+    if (this.joyrideMode === enabled) {
+      return;
+    }
+    this.joyrideMode = enabled;
+    if (this.lineMaterial) {
+      this.lineMaterial.opacity = enabled ? 0.42 : 0.6;
+    }
+    if (this.glowMaterial) {
+      this.glowMaterial.uniforms.uPointSize.value = enabled ? 3.8 : 6.0;
+      this.glowMaterial.uniforms.uOpacity.value = enabled ? 0.18 : 0.4;
+    }
+  }
+
+  generate(line1: string, line2: string, anchorTimeMs = Date.now()): void {
     // Clear any existing trail first
     this.clear();
 
@@ -88,7 +105,7 @@ export class OrbitTrailRenderer {
     // Derive orbital period from mean motion (radians/minute)
     const periodMinutes = (2 * Math.PI) / satrec.no;
     const periodMs = periodMinutes * 60 * 1000;
-    const now = Date.now();
+    const now = anchorTimeMs;
 
     const positions = new Float32Array(TRAIL_POINTS * 3);
     let lastValidX = 0, lastValidY = 0, lastValidZ = 0;
