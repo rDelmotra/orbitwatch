@@ -24,15 +24,10 @@ interface AnimState {
 export class CameraController {
   private readonly camera: THREE.PerspectiveCamera;
   private anim: AnimState | null = null;
-  private readonly worldUp = new THREE.Vector3(0, 1, 0);
   private readonly radialDir = new THREE.Vector3();
   private readonly joyrideForward = new THREE.Vector3(0, 1, 0);
-  private readonly joyrideUp = new THREE.Vector3(0, 1, 0);
-  private readonly joyrideRight = new THREE.Vector3(1, 0, 0);
   private readonly joyrideLookDir = new THREE.Vector3(0, 1, 0);
-  private readonly joyrideYawForward = new THREE.Vector3(0, 1, 0);
   private readonly joyrideYawRight = new THREE.Vector3(1, 0, 0);
-  private readonly joyrideFallbackUp = new THREE.Vector3(1, 0, 0);
   private readonly joyrideYawQuat = new THREE.Quaternion();
   private readonly joyridePitchQuat = new THREE.Quaternion();
   private readonly joyrideSmoothedForward = new THREE.Vector3(0, 1, 0);
@@ -212,30 +207,6 @@ export class CameraController {
       return;
     }
     this.copyRadialFallback(objectPos, outForward);
-  }
-
-  private buildJoyrideFrame(forward: THREE.Vector3, radialUp: THREE.Vector3): void {
-    this.joyrideRight.crossVectors(forward, radialUp);
-    if (this.joyrideRight.lengthSq() < 1e-10) {
-      const helperUp = Math.abs(forward.dot(this.worldUp)) < 0.95
-        ? this.worldUp
-        : this.joyrideFallbackUp;
-      this.joyrideRight.crossVectors(forward, helperUp);
-    }
-    const rightLenSq = this.joyrideRight.lengthSq();
-    if (rightLenSq > 1e-10) {
-      this.joyrideRight.multiplyScalar(1 / Math.sqrt(rightLenSq));
-    } else {
-      this.joyrideRight.set(1, 0, 0);
-    }
-
-    this.joyrideUp.crossVectors(this.joyrideRight, forward);
-    const upLenSq = this.joyrideUp.lengthSq();
-    if (upLenSq > 1e-10) {
-      this.joyrideUp.multiplyScalar(1 / Math.sqrt(upLenSq));
-    } else {
-      this.joyrideUp.copy(radialUp);
-    }
   }
 
   private copyRadialFallback(source: THREE.Vector3, outDir: THREE.Vector3): void {
