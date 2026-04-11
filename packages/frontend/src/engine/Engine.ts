@@ -1437,7 +1437,7 @@ export class Engine {
         const dy = e.clientY - this.joyrideLookPointerPos.y;
         this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
         if (dx !== 0 || dy !== 0) {
-          this.cameraController.addJoyrideLookInput(-dx * 0.003, -dy * 0.0025);
+          this.cameraController.addJoyrideLookInput(dx * 0.003, dy * 0.0025);
         }
         return;
       }
@@ -1727,7 +1727,7 @@ export class Engine {
         // Shallow height=0.02. radiusTop = 0.02 * 5.67 = 0.1134
         const geo = new THREE.CylinderGeometry(0.1134, 0.002, 0.02, 32, 1, true);
         geo.translate(0, 0.01, 0); // Offset so base is at (0,0,0)
-        
+
         const mat = new THREE.MeshBasicMaterial({
           color: 0x00e5ff,
           transparent: true,
@@ -1740,7 +1740,7 @@ export class Engine {
 
         this.observerMarker = new THREE.Group();
         this.earthRenderer.object.add(this.observerMarker);
-        
+
         const mesh = new THREE.Mesh(geo, mat);
         mesh.renderOrder = 1;
         this.observerMarker.add(mesh);

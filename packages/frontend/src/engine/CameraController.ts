@@ -135,22 +135,37 @@ export class CameraController {
       }
     }
 
-    this.buildJoyrideFrame(this.joyrideSmoothedForward, this.radialDir);
+    // Yaw around the STABLE radial-up (not the frame-derived up)
+    // This is the key fix — joyrideUp was wobbling with velocity changes
+    this.joyrideYawQuat.setFromAxisAngle(this.radialDir, this.joyrideYawRad);
 
-    this.joyrideYawQuat.setFromAxisAngle(this.joyrideUp, this.joyrideYawRad);
-    this.joyrideYawForward.copy(this.joyrideSmoothedForward).applyQuaternion(this.joyrideYawQuat);
-    this.joyrideYawRight.copy(this.joyrideRight).applyQuaternion(this.joyrideYawQuat);
+    // Yawed forward
+    const yawedForward = this.joyrideSmoothedForward.clone().applyQuaternion(this.joyrideYawQuat);
+
+    // Pitch axis = yawedForward × radialDir, normalized
+    this.joyrideYawRight.crossVectors(yawedForward, this.radialDir);
+    const rightLen = this.joyrideYawRight.length();
+    if (rightLen > 1e-6) {
+      this.joyrideYawRight.multiplyScalar(1 / rightLen);
+    } else {
+      // forward is nearly parallel to radialDir — use world X as fallback
+      this.joyrideYawRight.set(1, 0, 0);
+    }
 
     this.joyridePitchQuat.setFromAxisAngle(this.joyrideYawRight, this.joyridePitchRad);
-    this.joyrideLookDir.copy(this.joyrideYawForward).applyQuaternion(this.joyridePitchQuat);
-    const lookLenSq = this.joyrideLookDir.lengthSq();
-    if (lookLenSq > 1e-10) {
-      this.joyrideLookDir.multiplyScalar(1 / Math.sqrt(lookLenSq));
+
+    this.joyrideLookDir.copy(yawedForward).applyQuaternion(this.joyridePitchQuat);
+    const lookLen = this.joyrideLookDir.length();
+    if (lookLen > 1e-10) {
+      this.joyrideLookDir.multiplyScalar(1 / lookLen);
     } else {
       this.joyrideLookDir.copy(this.joyrideSmoothedForward);
     }
 
-    this.camera.position.copy(objectPos).addScaledVector(this.radialDir, this.getJoyrideSeatOffsetDistance(objectPos.length()));
+    this.camera.position.copy(objectPos).addScaledVector(
+      this.radialDir,
+      this.getJoyrideSeatOffsetDistance(objectPos.length()),
+    );
     outTarget.copy(this.camera.position).addScaledVector(
       this.joyrideLookDir,
       this.getJoyrideLookAheadDistance(objectPos.length()),
