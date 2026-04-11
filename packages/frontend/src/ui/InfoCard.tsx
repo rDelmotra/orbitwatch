@@ -107,9 +107,12 @@ export function InfoCard() {
   const showOrbitTrail = useStore((s) => s.showOrbitTrail);
   const setShowOrbitTrail = useStore((s) => s.setShowOrbitTrail);
   const triggerFlyTo = useStore((s) => s.triggerFlyTo);
+  const triggerJoyride = useStore((s) => s.triggerJoyride);
   const triggerFlyToDso = useStore((s) => s.triggerFlyToDso);
+  const triggerJoyrideDso = useStore((s) => s.triggerJoyrideDso);
   const cameraMode = useStore((s) => s.cameraMode);
   const setCameraMode = useStore((s) => s.setCameraMode);
+  const trackingStyle = useStore((s) => s.trackingStyle);
   const visibilityMode = useStore((s) => s.visibilityMode);
   const observerLocation = useStore((s) => s.observerLocation);
   const visualListStatus = useStore((s) => s.visualList.status);
@@ -129,6 +132,9 @@ export function InfoCard() {
 
   if (selectedDso) {
     const dso = selectedDso;
+    const isTracking = cameraMode === 'flying' || cameraMode === 'following';
+    const followActive = isTracking && trackingStyle === 'follow';
+    const joyrideActive = isTracking && trackingStyle === 'joyride';
     return (
       <div style={panelStyle}>
         <div style={headerStyle}>
@@ -159,10 +165,10 @@ export function InfoCard() {
         <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
           <button
             onClick={() => {
-              if (cameraMode === 'flying' || cameraMode === 'following') {
-                setCameraMode('returning');
-              } else if (cameraMode === 'returning') {
+              if (cameraMode === 'returning') {
                 setCameraMode('free');
+              } else if (followActive) {
+                setCameraMode('returning');
               } else {
                 triggerFlyToDso?.(dso.dsoId);
               }
@@ -170,16 +176,42 @@ export function InfoCard() {
             style={{
               flex: 1,
               padding: '6px 0',
-              background: cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
-              border: `1px solid ${cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
+              background: followActive ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+              border: `1px solid ${followActive ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
               borderRadius: 4,
-              color: cameraMode !== 'free' ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+              color: followActive ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
               fontFamily: 'monospace',
               fontSize: '11px',
               cursor: 'pointer',
             }}
           >
-            {cameraMode === 'following' ? 'Unfollow' : cameraMode === 'flying' ? 'Cancel' : cameraMode === 'returning' ? 'Stop' : 'Go to'}
+            {cameraMode === 'returning'
+              ? 'Stop'
+              : (followActive ? (cameraMode === 'flying' ? 'Cancel' : 'Unfollow') : 'Go to')}
+          </button>
+          <button
+            onClick={() => {
+              if (cameraMode === 'returning') {
+                setCameraMode('free');
+              } else if (joyrideActive) {
+                setCameraMode('returning');
+              } else {
+                triggerJoyrideDso?.(dso.dsoId);
+              }
+            }}
+            style={{
+              flex: 1,
+              padding: '6px 0',
+              background: joyrideActive ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+              border: `1px solid ${joyrideActive ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
+              borderRadius: 4,
+              color: joyrideActive ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+              fontFamily: 'monospace',
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            {joyrideActive ? (cameraMode === 'flying' ? 'Cancel ride' : 'Exit ride') : 'Joyride'}
           </button>
           <button
             onClick={() => setShowOrbitTrail(!showOrbitTrail)}
@@ -230,6 +262,9 @@ export function InfoCard() {
       maxElevationDeg: passForSelected.maxElevationDeg,
     };
   })();
+  const isTracking = cameraMode === 'flying' || cameraMode === 'following';
+  const followActive = isTracking && trackingStyle === 'follow';
+  const joyrideActive = isTracking && trackingStyle === 'joyride';
 
   return (
     <div style={panelStyle}>
@@ -307,27 +342,57 @@ export function InfoCard() {
       <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
         <button
           onClick={() => {
-            if (cameraMode === 'flying' || cameraMode === 'following') {
-              setCameraMode('returning');
-            } else if (cameraMode === 'returning') {
+            if (cameraMode === 'returning') {
               setCameraMode('free');
+            } else if (followActive) {
+              setCameraMode('returning');
             } else {
-              triggerFlyTo?.(selectedIndex!);
+              if (selectedIndex !== null) {
+                triggerFlyTo?.(selectedIndex);
+              }
             }
           }}
           style={{
             flex: 1,
             padding: '6px 0',
-            background: cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
-            border: `1px solid ${cameraMode !== 'free' ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
+            background: followActive ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+            border: `1px solid ${followActive ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
             borderRadius: 4,
-            color: cameraMode !== 'free' ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+            color: followActive ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
             fontFamily: 'monospace',
             fontSize: '11px',
             cursor: 'pointer',
           }}
         >
-          {cameraMode === 'following' ? 'Unfollow' : cameraMode === 'flying' ? 'Cancel' : cameraMode === 'returning' ? 'Stop' : 'Go to'}
+          {cameraMode === 'returning'
+            ? 'Stop'
+            : (followActive ? (cameraMode === 'flying' ? 'Cancel' : 'Unfollow') : 'Go to')}
+        </button>
+        <button
+          onClick={() => {
+            if (cameraMode === 'returning') {
+              setCameraMode('free');
+            } else if (joyrideActive) {
+              setCameraMode('returning');
+            } else {
+              if (selectedIndex !== null) {
+                triggerJoyride?.(selectedIndex);
+              }
+            }
+          }}
+          style={{
+            flex: 1,
+            padding: '6px 0',
+            background: joyrideActive ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+            border: `1px solid ${joyrideActive ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.12)'}`,
+            borderRadius: 4,
+            color: joyrideActive ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
+            fontFamily: 'monospace',
+            fontSize: '11px',
+            cursor: 'pointer',
+          }}
+        >
+          {joyrideActive ? (cameraMode === 'flying' ? 'Cancel ride' : 'Exit ride') : 'Joyride'}
         </button>
         <button
           onClick={() => {

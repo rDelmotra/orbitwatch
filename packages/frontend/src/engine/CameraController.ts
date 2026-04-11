@@ -24,6 +24,21 @@ interface AnimState {
 export class CameraController {
   private readonly camera: THREE.PerspectiveCamera;
   private anim: AnimState | null = null;
+  private readonly worldUp = new THREE.Vector3(0, 1, 0);
+  private readonly radialDir = new THREE.Vector3();
+  private readonly joyrideForward = new THREE.Vector3(0, 1, 0);
+  private readonly joyrideUp = new THREE.Vector3(0, 1, 0);
+  private readonly joyrideRight = new THREE.Vector3(1, 0, 0);
+  private readonly joyrideLookDir = new THREE.Vector3(0, 1, 0);
+  private readonly joyrideYawForward = new THREE.Vector3(0, 1, 0);
+  private readonly joyrideYawRight = new THREE.Vector3(1, 0, 0);
+  private readonly joyrideFallbackUp = new THREE.Vector3(1, 0, 0);
+  private readonly joyrideYawQuat = new THREE.Quaternion();
+  private readonly joyridePitchQuat = new THREE.Quaternion();
+  private readonly joyrideSmoothedForward = new THREE.Vector3(0, 1, 0);
+  private joyrideSmoothedValid = false;
+  private joyrideYawRad = 0;
+  private joyridePitchRad = 0;
 
   /** Radial offset distance for follow mode. Computed by flyTo(). */
   followOffsetDist = 0.15;
@@ -82,10 +97,147 @@ export class CameraController {
    * Writes the satellite position to `outTarget` for OrbitControls sync.
    */
   updateFollow(satPos: THREE.Vector3, outTarget: THREE.Vector3): void {
-    const radialDir = satPos.clone().normalize();
-    this.camera.position.copy(satPos).add(radialDir.multiplyScalar(this.followOffsetDist));
+    this.copyRadialFallback(satPos, this.radialDir);
+    this.camera.position.copy(satPos).addScaledVector(this.radialDir, this.followOffsetDist);
     outTarget.copy(satPos);
     this.camera.lookAt(satPos);
+  }
+
+  /** Seed look target while flying into joyride mode (camera-at-object). */
+  getJoyrideEntryTarget(objectPos: THREE.Vector3, objectVel: THREE.Vector3, outTarget: THREE.Vector3): void {
+    this.copyRadialFallback(objectPos, this.radialDir);
+    this.pickJoyrideForward(objectPos, objectVel, this.joyrideForward);
+    if (!this.joyrideSmoothedValid) {
+      this.joyrideSmoothedForward.copy(this.joyrideForward);
+      this.joyrideSmoothedValid = true;
+    }
+    outTarget.copy(objectPos).addScaledVector(this.joyrideForward, this.getJoyrideLookAheadDistance(objectPos.length()));
+  }
+
+  /**
+   * Joyride mode: camera rides with the object and lets the user free-look.
+   * Orientation basis follows velocity with robust fallback and smoothing.
+   */
+  updateJoyride(objectPos: THREE.Vector3, objectVel: THREE.Vector3, outTarget: THREE.Vector3): void {
+    this.copyRadialFallback(objectPos, this.radialDir);
+    this.pickJoyrideForward(objectPos, objectVel, this.joyrideForward);
+
+    if (!this.joyrideSmoothedValid) {
+      this.joyrideSmoothedForward.copy(this.joyrideForward);
+      this.joyrideSmoothedValid = true;
+    } else {
+      this.joyrideSmoothedForward.lerp(this.joyrideForward, 0.2);
+      const lenSq = this.joyrideSmoothedForward.lengthSq();
+      if (lenSq > 1e-10) {
+        this.joyrideSmoothedForward.multiplyScalar(1 / Math.sqrt(lenSq));
+      } else {
+        this.joyrideSmoothedForward.copy(this.joyrideForward);
+      }
+    }
+
+    this.buildJoyrideFrame(this.joyrideSmoothedForward, this.radialDir);
+
+    this.joyrideYawQuat.setFromAxisAngle(this.joyrideUp, this.joyrideYawRad);
+    this.joyrideYawForward.copy(this.joyrideSmoothedForward).applyQuaternion(this.joyrideYawQuat);
+    this.joyrideYawRight.copy(this.joyrideRight).applyQuaternion(this.joyrideYawQuat);
+
+    this.joyridePitchQuat.setFromAxisAngle(this.joyrideYawRight, this.joyridePitchRad);
+    this.joyrideLookDir.copy(this.joyrideYawForward).applyQuaternion(this.joyridePitchQuat);
+    const lookLenSq = this.joyrideLookDir.lengthSq();
+    if (lookLenSq > 1e-10) {
+      this.joyrideLookDir.multiplyScalar(1 / Math.sqrt(lookLenSq));
+    } else {
+      this.joyrideLookDir.copy(this.joyrideSmoothedForward);
+    }
+
+    this.camera.position.copy(objectPos).addScaledVector(this.radialDir, this.getJoyrideSeatOffsetDistance(objectPos.length()));
+    outTarget.copy(this.camera.position).addScaledVector(
+      this.joyrideLookDir,
+      this.getJoyrideLookAheadDistance(objectPos.length()),
+    );
+    this.camera.lookAt(outTarget);
+  }
+
+  addJoyrideLookInput(deltaYawRad: number, deltaPitchRad: number): void {
+    this.joyrideYawRad = this.wrapAngle(this.joyrideYawRad + deltaYawRad);
+    const maxPitch = THREE.MathUtils.degToRad(85);
+    this.joyridePitchRad = THREE.MathUtils.clamp(
+      this.joyridePitchRad + deltaPitchRad,
+      -maxPitch,
+      maxPitch,
+    );
+  }
+
+  resetJoyrideState(): void {
+    this.joyrideSmoothedValid = false;
+    this.joyrideYawRad = 0;
+    this.joyridePitchRad = 0;
+  }
+
+  private getJoyrideLookAheadDistance(objectRadiusEr: number): number {
+    return Math.min(Math.max(objectRadiusEr * 0.04, 0.12), 4.0);
+  }
+
+  private getJoyrideSeatOffsetDistance(objectRadiusEr: number): number {
+    return Math.min(Math.max(objectRadiusEr * 0.00008, 0.00045), 0.004);
+  }
+
+  private pickJoyrideForward(
+    objectPos: THREE.Vector3,
+    objectVel: THREE.Vector3,
+    outForward: THREE.Vector3,
+  ): void {
+    const velLenSq = objectVel.lengthSq();
+    if (velLenSq > 1e-12) {
+      outForward.copy(objectVel).multiplyScalar(1 / Math.sqrt(velLenSq));
+      return;
+    }
+    if (this.joyrideSmoothedValid) {
+      outForward.copy(this.joyrideSmoothedForward);
+      return;
+    }
+    this.copyRadialFallback(objectPos, outForward);
+  }
+
+  private buildJoyrideFrame(forward: THREE.Vector3, radialUp: THREE.Vector3): void {
+    this.joyrideRight.crossVectors(forward, radialUp);
+    if (this.joyrideRight.lengthSq() < 1e-10) {
+      const helperUp = Math.abs(forward.dot(this.worldUp)) < 0.95
+        ? this.worldUp
+        : this.joyrideFallbackUp;
+      this.joyrideRight.crossVectors(forward, helperUp);
+    }
+    const rightLenSq = this.joyrideRight.lengthSq();
+    if (rightLenSq > 1e-10) {
+      this.joyrideRight.multiplyScalar(1 / Math.sqrt(rightLenSq));
+    } else {
+      this.joyrideRight.set(1, 0, 0);
+    }
+
+    this.joyrideUp.crossVectors(this.joyrideRight, forward);
+    const upLenSq = this.joyrideUp.lengthSq();
+    if (upLenSq > 1e-10) {
+      this.joyrideUp.multiplyScalar(1 / Math.sqrt(upLenSq));
+    } else {
+      this.joyrideUp.copy(radialUp);
+    }
+  }
+
+  private copyRadialFallback(source: THREE.Vector3, outDir: THREE.Vector3): void {
+    const lenSq = source.lengthSq();
+    if (lenSq <= 1e-10) {
+      outDir.set(0, 1, 0);
+      return;
+    }
+    outDir.copy(source).multiplyScalar(1 / Math.sqrt(lenSq));
+  }
+
+  private wrapAngle(radians: number): number {
+    const twoPi = Math.PI * 2;
+    let wrapped = radians % twoPi;
+    if (wrapped > Math.PI) wrapped -= twoPi;
+    if (wrapped < -Math.PI) wrapped += twoPi;
+    return wrapped;
   }
 
   /** Cancel any active animation. */

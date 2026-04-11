@@ -19,7 +19,12 @@ type WorkerInMessage =
   | { type: 'BUILD_TRAIL'; dsoId: string; pointCount?: number };
 
 type WorkerOutMessage =
-  | { type: 'POSITIONS'; positions: Float32Array; visibleFlags: Uint8Array }
+  | {
+      type: 'POSITIONS';
+      positions: Float32Array;
+      velocities: Float32Array;
+      visibleFlags: Uint8Array;
+    }
   | { type: 'TRAIL'; dsoId: string; positions: Float32Array };
 
 let dsoIds: string[] = [];
@@ -39,9 +44,12 @@ function clampTrailPointCount(count: number | undefined): number {
   return rounded;
 }
 
-function buildPositions(timestamp: number): { positions: Float32Array; visibleFlags: Uint8Array } {
+function buildPositions(
+  timestamp: number,
+): { positions: Float32Array; velocities: Float32Array; visibleFlags: Uint8Array } {
   const count = dsoIds.length;
   const positions = new Float32Array(count * 3);
+  const velocities = new Float32Array(count * 3);
   const visibleFlags = new Uint8Array(count);
 
   for (let i = 0; i < count; i++) {
@@ -55,10 +63,13 @@ function buildPositions(timestamp: number): { positions: Float32Array; visibleFl
     positions[i3] = pos.x;
     positions[i3 + 1] = pos.y;
     positions[i3 + 2] = pos.z;
+    velocities[i3] = pos.vx;
+    velocities[i3 + 1] = pos.vy;
+    velocities[i3 + 2] = pos.vz;
     visibleFlags[i] = 1;
   }
 
-  return { positions, visibleFlags };
+  return { positions, velocities, visibleFlags };
 }
 
 function buildTrailPositions(dsoId: string, pointCount?: number): Float32Array {
@@ -136,9 +147,13 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
       validToGraceMs = toClampedGraceMs(msg.validToGraceSec);
       break;
     case 'TICK': {
-      const { positions, visibleFlags } = buildPositions(msg.timestamp);
-      const out: WorkerOutMessage = { type: 'POSITIONS', positions, visibleFlags };
-      (self as unknown as Worker).postMessage(out, [positions.buffer, visibleFlags.buffer]);
+      const { positions, velocities, visibleFlags } = buildPositions(msg.timestamp);
+      const out: WorkerOutMessage = { type: 'POSITIONS', positions, velocities, visibleFlags };
+      (self as unknown as Worker).postMessage(out, [
+        positions.buffer,
+        velocities.buffer,
+        visibleFlags.buffer,
+      ]);
       break;
     }
     case 'BUILD_TRAIL': {
