@@ -132,7 +132,7 @@ export class Engine {
 
     // ── Camera ────────────────────────────────────────────────────────────────
     const aspect = canvas.clientWidth / canvas.clientHeight;
-    this.camera = new THREE.PerspectiveCamera(45, aspect, 0.01, 1000);
+    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.01, 1000);
     this.camera.position.set(0, 1.5, 3.5);
 
     // ── Controls ──────────────────────────────────────────────────────────────
