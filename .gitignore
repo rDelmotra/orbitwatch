@@ -16,6 +16,11 @@ build/
 !.env.example
 *.env.local
 
+# --------------------------------------------
+high-res-textures/
+conversation_with_ai.txt
+# --------------------------------------------
+
 # ── Data & Assets ────────────────────────────────────────────────────────────
 # 13MB Backend cache (Crucial)
 packages/backend/data/tle-cache.json
