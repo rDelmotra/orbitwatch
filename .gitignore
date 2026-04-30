@@ -9,6 +9,7 @@ build/
 .vite/
 .turbo/
 *.tsbuildinfo
+my_plans/
 
 # ── Environment & Secrets ────────────────────────────────────────────────────
 .env
