@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useDevStore } from '../store/devStore';
-import type { ValidationReport } from '../store/devStore';
+import type { ValidationReport, AwarenessSnapshot } from '../store/devStore';
 
 const panelStyle: React.CSSProperties = {
   position: 'fixed',
@@ -100,9 +100,110 @@ function ReportView({ r }: { r: ValidationReport }) {
   );
 }
 
+function fmtMs(ms: number): string {
+  if (ms < 0) return `${Math.abs(Math.round(ms / 1000))}s ago`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}m${r.toString().padStart(2, '0')}s`;
+}
+
+function WorldModelPanel({ snap }: { snap: AwarenessSnapshot }) {
+  const { frustum, notables, behavior, observer, upcoming, changes } = snap;
+  const delta = changes.inViewDelta;
+  const deltaStr = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : '±0';
+
+  const regimeStr = Object.entries(frustum.byRegime)
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(' ');
+
+  return (
+    <>
+      <Divider />
+      <div style={{ color: 'rgba(255,255,255,0.4)', marginBottom: 4, fontSize: '10px', letterSpacing: '0.5px' }}>
+        WORLD MODEL (5Hz) #{snap.snapshotId}
+      </div>
+
+      <Row label="In view" value={`${frustum.inViewCount} (${deltaStr})  ${regimeStr}`} />
+      {frustum.topGroups[0] && (
+        <Row label="Top group" value={`${frustum.topGroups[0].regime}/${frustum.topGroups[0].category}: ${frustum.topGroups[0].count}`} />
+      )}
+      <Row label="Peripheral" value={String(frustum.peripheralCount)} />
+
+      <Divider />
+
+      {notables.map((n) => {
+        const loc = n.inFrustum ? 'in-view' : n.inPeripheral ? 'periph' : 'offscreen';
+        const light = n.eclipsed ? 'eclipsed' : 'sunlit';
+        return (
+          <Row
+            key={n.noradId}
+            label={n.name.length > 14 ? n.name.slice(0, 13) + '…' : n.name}
+            value={`${Math.round(n.altitudeKm)}km  ${loc}  ${light}`}
+            color={n.inFrustum ? ok : n.inPeripheral ? warn : undefined}
+          />
+        );
+      })}
+
+      <Divider />
+
+      <Row label="Camera" value={`${behavior.cameraMode}  stat ${behavior.stationaryDurationSec.toFixed(1)}s  ω${behavior.angularVelocityRadPerSec.toFixed(3)}`} />
+      {behavior.dominantRegimeInView && (
+        <Row label="Looking at" value={behavior.dominantRegimeInView} />
+      )}
+      {observer.active ? (
+        <Row label="Observer" value={`${observer.twilightPhase}  ${observer.nakedEyeQuality} visibility`} />
+      ) : (
+        <Row label="Observer" value="not set" color="rgba(255,255,255,0.3)" />
+      )}
+
+      {upcoming.hasObserver && upcoming.currentPass && (
+        <>
+          <Divider />
+          <div style={{ color: 'rgba(255,255,255,0.4)', marginBottom: 2, fontSize: '10px', letterSpacing: '0.5px' }}>
+            UPCOMING (world-frame)
+          </div>
+          {upcoming.currentPass.status === 'computing' && (
+            <Row label={upcoming.currentPass.name} value="computing…" />
+          )}
+          {upcoming.currentPass.status === 'upcoming' && upcoming.currentPass.timeToAosMs !== null && (
+            <Row
+              label={upcoming.currentPass.name}
+              value={`pass in ${fmtMs(upcoming.currentPass.timeToAosMs)}  max el ${upcoming.currentPass.maxElevationDeg?.toFixed(0)}°`}
+              color={ok}
+            />
+          )}
+          {upcoming.currentPass.status === 'in_view' && (
+            <Row
+              label={upcoming.currentPass.name}
+              value={`IN VIEW now  LOS in ${upcoming.currentPass.losTimeMs ? fmtMs(upcoming.currentPass.losTimeMs - Date.now()) : '?'}`}
+              color={ok}
+            />
+          )}
+          {upcoming.currentPass.status === 'none' && (
+            <Row label={upcoming.currentPass.name} value="no pass 24h" color="rgba(255,255,255,0.3)" />
+          )}
+        </>
+      )}
+
+      {changes.notableTransitions.length > 0 && (
+        <>
+          <Divider />
+          {changes.notableTransitions.slice(0, 3).map((t, i) => (
+            <Row key={i} label="→" value={`${t.name} ${t.kind.replace(/_/g, ' ')}`} color={warn} />
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
 export function DevOverlay() {
   const visible = useDevStore((s) => s.visible);
   const report = useDevStore((s) => s.report);
+  const worldModelSnapshot = useDevStore((s) => s.worldModelSnapshot);
   const toggle = useDevStore((s) => s.toggle);
 
   useEffect(() => {
@@ -123,6 +224,7 @@ export function DevOverlay() {
       {report ? <ReportView r={report} /> : (
         <span style={{ color: 'rgba(255,255,255,0.4)' }}>Waiting for data...</span>
       )}
+      {worldModelSnapshot && <WorldModelPanel snap={worldModelSnapshot} />}
     </div>
   );
 }

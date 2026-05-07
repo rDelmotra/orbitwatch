@@ -23,6 +23,7 @@ import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import type { DsoSnapshot } from '../data/dso-types';
+import { WorldModel } from '../worldmodel/WorldModel';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
@@ -103,6 +104,8 @@ export class Engine {
   private visualPassTrailNoradId: number | null = null;
   private visualPassUnsub: (() => void) | null = null;
   private observerMarker: THREE.Group | null = null;
+  private worldModel: WorldModel | null = null;
+  private worldModelAccum = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -291,6 +294,15 @@ export class Engine {
       useStore.getState().setTriggerFlyToDso((dsoId: string) => this.flyToDso(dsoId));
 
       this.satelliteRenderer.initFromCatalog(catalogData);
+
+      this.worldModel = new WorldModel({
+        camera: this.camera,
+        controlsTarget: this.controls.target,
+        getCurrPosAttr: () => this.satelliteRenderer.mesh.geometry.getAttribute('currentPosition') as THREE.BufferAttribute,
+        getCurrSizeAttr: () => this.satelliteRenderer.mesh.geometry.getAttribute('currentSize') as THREE.BufferAttribute,
+        catalogData,
+        objectCount: catalogData.length,
+      });
 
       this.gpuPicker = new GPUPicker(
         this.renderer,
@@ -1257,6 +1269,16 @@ export class Engine {
       this.camera.position.length(),
       this.renderer.getPixelRatio(),
     );
+
+    // ── WorldModel perception tick (5Hz via accumulator) ─────────────────────
+    if (this.worldModel && this.firstPositionReceived) {
+      this.worldModelAccum += delta * 1000;
+      if (this.worldModelAccum >= 200) {
+        this.worldModelAccum -= 200;
+        this.worldModel.tick(sunDir, 0.2);
+      }
+    }
+
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -1628,6 +1650,8 @@ export class Engine {
       });
       this.observerMarker = null;
     }
+    this.worldModel?.dispose();
+    this.worldModel = null;
     this.gpuPicker?.dispose();
     this.dsoRenderer.dispose();
     this.orbitTrailRenderer.dispose();
