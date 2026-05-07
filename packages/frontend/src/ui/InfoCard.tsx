@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { useStore } from '../store/useStore';
 import type { ObjectCategory } from '../data/types';
 
@@ -56,17 +55,6 @@ const closeStyle: React.CSSProperties = {
   lineHeight: 1,
 };
 
-const subsectionStyle: React.CSSProperties = {
-  marginTop: 10,
-  paddingTop: 8,
-  borderTop: '1px solid rgba(255, 255, 255, 0.1)',
-};
-
-const subsectionHeaderStyle: React.CSSProperties = {
-  color: 'rgba(255, 255, 255, 0.45)',
-  fontSize: '11px',
-  marginBottom: 4,
-};
 
 function Row({ label, value }: { label: string; value: string | number | null }) {
   if (value === null || value === '') return null;
@@ -78,24 +66,6 @@ function Row({ label, value }: { label: string; value: string | number | null })
   );
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
-
-function formatUtcClock(ms: number): string {
-  return `${new Date(ms).toISOString().slice(11, 19)} UTC`;
-}
 
 export function InfoCard() {
   const selectedSatellite = useStore((s) => s.selectedSatellite);
@@ -113,20 +83,6 @@ export function InfoCard() {
   const cameraMode = useStore((s) => s.cameraMode);
   const setCameraMode = useStore((s) => s.setCameraMode);
   const trackingStyle = useStore((s) => s.trackingStyle);
-  const visibilityMode = useStore((s) => s.visibilityMode);
-  const observerLocation = useStore((s) => s.observerLocation);
-  const visualListStatus = useStore((s) => s.visualList.status);
-  const visualPass = useStore((s) => s.visualPass);
-  const [nowMs, setNowMs] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!selectedSatellite || visibilityMode !== 'visual') {
-      return;
-    }
-    setNowMs(Date.now());
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [selectedSatellite?.noradId, visibilityMode]);
 
   if (!selectedSatellite && !selectedDso) return null;
 
@@ -235,33 +191,6 @@ export function InfoCard() {
   }
 
   const s = selectedSatellite!;
-  const autoVisualPredictedTrail = visibilityMode === 'visual' && observerLocation !== null;
-  const passForSelected = visualPass.noradId === s.noradId ? visualPass : null;
-  const passReadyMetrics = (() => {
-    if (
-      !passForSelected
-      || passForSelected.status !== 'ready'
-      || passForSelected.aosTimeMs === null
-      || passForSelected.tcaTimeMs === null
-      || passForSelected.losTimeMs === null
-      || passForSelected.durationMs === null
-      || passForSelected.maxElevationDeg === null
-    ) {
-      return null;
-    }
-
-    const inViewNow = nowMs >= passForSelected.aosTimeMs && nowMs <= passForSelected.losTimeMs;
-    return {
-      inViewNow,
-      startsInMs: inViewNow ? 0 : Math.max(0, passForSelected.aosTimeMs - nowMs),
-      remainingMs: inViewNow ? Math.max(0, passForSelected.losTimeMs - nowMs) : null,
-      aosTimeMs: passForSelected.aosTimeMs,
-      tcaTimeMs: passForSelected.tcaTimeMs,
-      losTimeMs: passForSelected.losTimeMs,
-      durationMs: passForSelected.durationMs,
-      maxElevationDeg: passForSelected.maxElevationDeg,
-    };
-  })();
   const isTracking = cameraMode === 'flying' || cameraMode === 'following';
   const followActive = isTracking && trackingStyle === 'follow';
   const joyrideActive = isTracking && trackingStyle === 'joyride';
@@ -297,47 +226,6 @@ export function InfoCard() {
       <Row label="Country" value={s.countryCode} />
       <Row label="Launch" value={s.launchDate} />
       <Row label="Epoch" value={s.epoch?.slice(0, 10) ?? null} />
-
-      {visibilityMode === 'visual' && (
-        <div style={subsectionStyle}>
-          <div style={subsectionHeaderStyle}>Naked-eye pass (&gt;10° elevation)</div>
-          {observerLocation === null ? (
-            <div style={{ color: 'rgba(255, 193, 7, 0.95)', fontSize: '11px', lineHeight: 1.35 }}>
-              Observer location is required for pass prediction.
-            </div>
-          ) : visualListStatus === 'unavailable' ? (
-            <div style={{ color: 'rgba(244, 67, 54, 0.95)', fontSize: '11px', lineHeight: 1.35 }}>
-              Curated VISUAL list unavailable.
-            </div>
-          ) : passReadyMetrics ? (
-            <>
-              <Row label="State" value={passReadyMetrics.inViewNow ? 'In view now' : 'Upcoming'} />
-              <Row label="Starts in" value={passReadyMetrics.inViewNow ? 'now' : formatDuration(passReadyMetrics.startsInMs)} />
-              <Row label="In-view window" value={formatDuration(passReadyMetrics.durationMs)} />
-              <Row
-                label="Remaining"
-                value={passReadyMetrics.remainingMs !== null ? formatDuration(passReadyMetrics.remainingMs) : null}
-              />
-              <Row label="Max elevation" value={`${passReadyMetrics.maxElevationDeg.toFixed(1)}°`} />
-              <Row label="AOS" value={formatUtcClock(passReadyMetrics.aosTimeMs)} />
-              <Row label="TCA" value={formatUtcClock(passReadyMetrics.tcaTimeMs)} />
-              <Row label="LOS" value={formatUtcClock(passReadyMetrics.losTimeMs)} />
-            </>
-          ) : passForSelected?.status === 'no_pass' ? (
-            <div style={{ color: 'rgba(255, 193, 7, 0.95)', fontSize: '11px', lineHeight: 1.35 }}>
-              {passForSelected.message ?? 'No pass above 10° elevation in the next 24h.'}
-            </div>
-          ) : passForSelected?.status === 'unavailable' ? (
-            <div style={{ color: 'rgba(244, 67, 54, 0.95)', fontSize: '11px', lineHeight: 1.35 }}>
-              {passForSelected.message ?? 'Pass prediction unavailable.'}
-            </div>
-          ) : (
-            <div style={{ color: 'rgba(255, 255, 255, 0.7)', fontSize: '11px', lineHeight: 1.35 }}>
-              Computing next pass...
-            </div>
-          )}
-        </div>
-      )}
 
       <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
         <button
@@ -395,31 +283,20 @@ export function InfoCard() {
           {joyrideActive ? (cameraMode === 'flying' ? 'Cancel ride' : 'Exit ride') : 'Joyride'}
         </button>
         <button
-          onClick={() => {
-            if (!autoVisualPredictedTrail) {
-              setShowOrbitTrail(!showOrbitTrail);
-            }
-          }}
-          disabled={autoVisualPredictedTrail}
-          title={autoVisualPredictedTrail ? 'Predicted trail auto-renders in Naked Eye mode' : undefined}
+          onClick={() => setShowOrbitTrail(!showOrbitTrail)}
           style={{
             flex: 1,
             padding: '6px 0',
-            background: autoVisualPredictedTrail
-              ? 'rgba(0, 229, 255, 0.15)'
-              : (showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)'),
-            border: `1px solid ${autoVisualPredictedTrail
-              ? 'rgba(0, 229, 255, 0.4)'
-              : (showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)')}`,
+            background: showOrbitTrail ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+            border: `1px solid ${showOrbitTrail ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.12)'}`,
             borderRadius: 4,
-            color: autoVisualPredictedTrail ? '#00E5FF' : (showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)'),
+            color: showOrbitTrail ? '#00E5FF' : 'rgba(255, 255, 255, 0.7)',
             fontFamily: 'monospace',
             fontSize: '11px',
-            cursor: autoVisualPredictedTrail ? 'default' : 'pointer',
-            opacity: autoVisualPredictedTrail ? 0.9 : 1,
+            cursor: 'pointer',
           }}
         >
-          {autoVisualPredictedTrail ? 'Predicted trail auto' : (showOrbitTrail ? 'Hide orbit' : 'Show orbit')}
+          {showOrbitTrail ? 'Hide orbit' : 'Show orbit'}
         </button>
       </div>
     </div>

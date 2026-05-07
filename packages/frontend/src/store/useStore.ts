@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
-import type { DsoObject, DsoSnapshot, TrackedObject } from '../data/dso-types';
+import type { DsoObject, DsoSnapshot } from '../data/dso-types';
 import type { VisualListSource, VisualListStatus } from '../data/visualList';
 import type { DsoLabelPosition } from '../engine/DsoRenderer';
 
@@ -19,20 +19,6 @@ export interface VisualListState {
   message: string | null;
 }
 
-export type VisualPassStatus = 'idle' | 'computing' | 'ready' | 'no_pass' | 'unavailable';
-
-export interface VisualPassState {
-  status: VisualPassStatus;
-  noradId: number | null;
-  generatedAtMs: number | null;
-  aosTimeMs: number | null;
-  tcaTimeMs: number | null;
-  losTimeMs: number | null;
-  maxElevationDeg: number | null;
-  durationMs: number | null;
-  message: string | null;
-}
-
 interface AppState {
   loadingPhase: LoadingPhase;
   loadingError: string | null;
@@ -40,7 +26,6 @@ interface AppState {
   trackingStyle: TrackingStyle;
   objectCount: number;
   categoryCounts: Record<ObjectCategory, number>;
-  dataVersion: string | null;
   dataTimestamp: number | null;
 
   catalogData: EnrichedTLEObject[];
@@ -57,7 +42,6 @@ interface AppState {
   // DSO state
   dsoObjects: DsoObject[];
   dsoEphemerisById: Record<string, DsoSnapshot>;
-  dsoCount: number;
   selectedDso: DsoObject | null;
   dsoLabelPositions: DsoLabelPosition[];
   triggerFlyToDso: ((dsoId: string) => void) | null;
@@ -74,7 +58,6 @@ interface AppState {
   observerLocation: { lat: number; lon: number; alt: number } | null;
   visibilityMode: VisibilityMode;
   visualList: VisualListState;
-  visualPass: VisualPassState;
 
   categoryFilters: Record<ObjectCategory, boolean>;
   regimeFilters: Record<OrbitalRegime, boolean>;
@@ -93,7 +76,6 @@ interface AppState {
     objectCount: number;
     categoryCounts: Record<ObjectCategory, number>;
     regimeCounts: Record<OrbitalRegime, number>;
-    version: string;
   }) => void;
   toggleCategoryFilter: (category: ObjectCategory) => void;
   toggleRegimeFilter: (regime: OrbitalRegime) => void;
@@ -115,7 +97,6 @@ interface AppState {
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
   setVisualListState: (state: VisualListState) => void;
-  setVisualPassState: (state: VisualPassState) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -141,7 +122,6 @@ export const useStore = create<AppState>((set) => ({
     unknown: 0,
     deep_space: 0,
   },
-  dataVersion: null,
   dataTimestamp: null,
 
   catalogData: [],
@@ -157,7 +137,6 @@ export const useStore = create<AppState>((set) => ({
 
   dsoObjects: [],
   dsoEphemerisById: {},
-  dsoCount: 0,
   selectedDso: null,
   dsoLabelPositions: [],
   triggerFlyToDso: null,
@@ -180,17 +159,6 @@ export const useStore = create<AppState>((set) => ({
     stale: false,
     count: 0,
     updatedAt: null,
-    message: null,
-  },
-  visualPass: {
-    status: 'idle',
-    noradId: null,
-    generatedAtMs: null,
-    aosTimeMs: null,
-    tcaTimeMs: null,
-    losTimeMs: null,
-    maxElevationDeg: null,
-    durationMs: null,
     message: null,
   },
 
@@ -228,7 +196,6 @@ export const useStore = create<AppState>((set) => ({
       regimeCounts: info.regimeCounts,
       visibleCategoryCounts: { ...info.categoryCounts },
       visibleRegimeCounts: { ...info.regimeCounts },
-      dataVersion: info.version,
       dataTimestamp: Date.now(),
     }),
   toggleCategoryFilter: (category) =>
@@ -285,12 +252,10 @@ export const useStore = create<AppState>((set) => ({
       return { visibilityMode: mode };
     }),
   setVisualListState: (visualList) => set({ visualList }),
-  setVisualPassState: (visualPass) => set({ visualPass }),
 
   setDsoObjects: (objects) =>
     set((state) => ({
       dsoObjects: objects,
-      dsoCount: objects.length,
       categoryCounts: { ...state.categoryCounts, deep_space: objects.length },
     })),
   setDsoEphemeris: (dsoId, snapshot) =>
@@ -320,9 +285,3 @@ export const useStore = create<AppState>((set) => ({
   setTriggerJoyrideDso: (fn) => set({ triggerJoyrideDso: fn }),
 }));
 
-/** Selector: currently selected object as a TrackedObject, or null. */
-export function selectTrackedObject(state: AppState): TrackedObject | null {
-  if (state.selectedDso) return state.selectedDso;
-  if (state.selectedSatellite) return { ...state.selectedSatellite, source: 'tle' as const };
-  return null;
-}
