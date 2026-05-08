@@ -97,7 +97,7 @@ export class GPUPicker {
     this.renderer.getClearColor(savedClearColor);
     const savedClearAlpha = this.renderer.getClearAlpha();
     const savedToneMapping = this.renderer.toneMapping;
-    const savedOutputColorSpace = this.renderer.outputColorSpace;
+    const savedOutputColorSpace = this.renderer.outputColorSpace as THREE.ColorSpace;
 
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
