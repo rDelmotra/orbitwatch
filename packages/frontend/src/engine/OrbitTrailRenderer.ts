@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as satellite from 'satellite.js';
+import { simClock } from './SimClock';
 
 const EARTH_RADIUS_KM = 6371;
 const TRAIL_POINTS = 360;
@@ -96,7 +97,7 @@ export class OrbitTrailRenderer {
     }
   }
 
-  generate(line1: string, line2: string, anchorTimeMs = Date.now()): void {
+  generate(line1: string, line2: string, anchorTimeMs = simClock.now()): void {
     // Clear any existing trail first
     this.clear();
 

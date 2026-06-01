@@ -8,6 +8,7 @@ import { InfoCard } from './ui/InfoCard';
 import { Tooltip } from './ui/Tooltip';
 import { ClusterPopup } from './ui/ClusterPopup';
 import { DevOverlay } from './ui/DevOverlay';
+import { TimeController } from './ui/TimeController';
 import { useStore } from './store/useStore';
 
 function DsoLabels() {
@@ -115,6 +116,7 @@ export default function App() {
         <FilterPanel />
         <InfoCard />
         <DsoLabels />
+        <TimeController />
         <ResetViewButton />
       </div>
       <Tooltip />

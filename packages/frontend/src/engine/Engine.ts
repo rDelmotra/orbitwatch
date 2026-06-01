@@ -19,6 +19,7 @@ import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import type { DsoSnapshot } from '../data/dso-types';
+import { simClock } from './SimClock';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
@@ -106,6 +107,7 @@ export class Engine {
   private readonly trackingEndCamPos = new THREE.Vector3();
   private readonly joyrideEntryTarget = new THREE.Vector3();
   private readonly trackingVelocity = new THREE.Vector3();
+  private lastSimTimeUpdateAt = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -283,6 +285,7 @@ export class Engine {
       useStore.getState().setTriggerResetCamera(() => this.resetCamera());
       useStore.getState().setTriggerFlyToDso((dsoId: string) => this.flyToDso(dsoId));
       useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.joyrideDso(dsoId));
+      useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
 
       this.satelliteRenderer.initFromCatalog(catalogData);
 
@@ -416,14 +419,15 @@ export class Engine {
           this.objectCount = msg.objectCount;
           console.log(`SGP4 worker ready: ${this.objectCount} objects`);
           useStore.getState().setLoadingPhase('propagating');
-          this.worker!.postMessage({ type: 'PROPAGATE', timestamp: Date.now() });
+          this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
           this.propagationInterval = setInterval(() => {
-            this.worker!.postMessage({ type: 'PROPAGATE', timestamp: Date.now() });
+            this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
           }, 1000);
         } else if (msg.type === 'POSITIONS') {
           const state = useStore.getState();
-          const observerPos = this.getObserverScenePositionForState(state);
-          const sunDir = getSunDirection(new Date());
+          const propagationDate = new Date(msg.timestamp);
+          const observerPos = this.getObserverScenePositionForState(state, propagationDate);
+          const sunDir = getSunDirection(propagationDate);
           this.updateTleVelocityBuffers(msg.velocities);
 
           const counts = this.satelliteRenderer.updatePositions(
@@ -479,6 +483,7 @@ export class Engine {
 
   private getObserverScenePositionForState(
     state: ReturnType<typeof useStore.getState>,
+    date: Date,
   ): THREE.Vector3 | null {
     if (state.visibilityMode === 'all' || !state.observerLocation) {
       return null;
@@ -488,7 +493,7 @@ export class Engine {
       state.observerLocation.lat,
       state.observerLocation.lon,
       state.observerLocation.alt,
-      new Date(),
+      date,
     );
   }
 
@@ -497,8 +502,9 @@ export class Engine {
       return;
     }
 
-    const observerPos = this.getObserverScenePositionForState(state);
-    const sunDir = getSunDirection(new Date());
+    const simDate = simClock.date();
+    const observerPos = this.getObserverScenePositionForState(state, simDate);
+    const sunDir = getSunDirection(simDate);
 
     const counts = this.satelliteRenderer.applyFilters(
       this.catalogData,
@@ -547,7 +553,7 @@ export class Engine {
       loc.lat,
       loc.lon,
       loc.alt,
-      new Date(),
+      simClock.date(),
     );
     const upDir = observerWorldPos.clone().normalize();
     return { observerWorldPos, upDir };
@@ -819,7 +825,7 @@ export class Engine {
 
   private getCurrentPropagationTimestampMs(): number {
     if (this.lastPropagationTimestampMs <= 0 || this.lastTickTime <= 0) {
-      return Date.now();
+      return simClock.now();
     }
 
     const elapsedMs = Math.min(
@@ -877,6 +883,29 @@ export class Engine {
     return out;
   }
 
+  /** Called by store actions on rate change, jumpTo, or reset. */
+  private onSimTimeJump(): void {
+    // Immediate TLE propagation at new sim-time
+    this.worker?.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+
+    // Immediate DSO tick at new sim-time
+    if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
+      this.dsoWorker.postMessage({
+        type: 'TICK',
+        timestamp: simClock.now(),
+      } satisfies DsoWorkerInMessage);
+      this.dsoWorkerTickInFlight = true;
+      this.dsoWorkerLastTickSentAt = performance.now();
+    }
+
+    // Reset interpolation state so we don't tween from old time
+    this.lastTickTime = 0;
+    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
+
+    // Refresh orbit trails at new time
+    this.refreshOrbitTrail(useStore.getState());
+  }
+
   start(): void {
     this.clock.start();
     this.loop();
@@ -885,7 +914,7 @@ export class Engine {
   private loop = (): void => {
     this.animationId = requestAnimationFrame(this.loop);
     const delta = this.clock.getDelta();
-    const now = new Date();
+    const now = simClock.date();
 
     const sunDir = getSunDirection(now);
     this.earthRenderer.sunDirection.copy(sunDir);
@@ -915,11 +944,18 @@ export class Engine {
     if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
       this.dsoWorker.postMessage({
         type: 'TICK',
-        timestamp: Date.now(),
+        timestamp: simClock.now(),
       } satisfies DsoWorkerInMessage);
       this.dsoWorkerTickInFlight = true;
       this.dsoWorkerLastTickSentAt = performance.now();
     }
+    // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
+    const wallNow = performance.now();
+    if (wallNow - this.lastSimTimeUpdateAt > 250) {
+      useStore.getState().setSimTimeMs(simClock.now());
+      this.lastSimTimeUpdateAt = wallNow;
+    }
+
     this.dsoRenderer.updateUniforms(this.renderer.getPixelRatio());
 
     // ── DSO label screen positions ────────────────────────────────────────────

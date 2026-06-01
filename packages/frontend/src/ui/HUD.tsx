@@ -37,13 +37,9 @@ export function HUD() {
   const loadingPhase = useStore((s) => s.loadingPhase);
   const objectCount = useStore((s) => s.objectCount);
   const dataTimestamp = useStore((s) => s.dataTimestamp);
-  const [utc, setUtc] = useState(() => formatUTC(new Date()));
+  const simTimeMs = useStore((s) => s.simTimeMs);
+  const utc = formatUTC(new Date(simTimeMs));
   const [freshness, setFreshness] = useState(() => formatFreshness(dataTimestamp));
-
-  useEffect(() => {
-    const id = setInterval(() => setUtc(formatUTC(new Date())), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     setFreshness(formatFreshness(dataTimestamp));

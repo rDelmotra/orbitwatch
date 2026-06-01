@@ -3,6 +3,7 @@ import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/t
 import type { DsoObject, DsoSnapshot } from '../data/dso-types';
 import type { VisualListSource, VisualListStatus } from '../data/visualList';
 import type { DsoLabelPosition } from '../engine/DsoRenderer';
+import { simClock } from '../engine/SimClock';
 
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
@@ -97,6 +98,16 @@ interface AppState {
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
   setVisualListState: (state: VisualListState) => void;
+
+  // Simulation clock (UI mirrors — simClock is source of truth)
+  simRate: number;
+  simTimeMs: number;
+  triggerSimTimeJump: (() => void) | null;
+  setSimRate: (rate: number) => void;
+  setSimTimeMs: (ms: number) => void;
+  jumpToSimTime: (date: Date) => void;
+  resetSimClock: () => void;
+  setTriggerSimTimeJump: (fn: () => void) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -252,6 +263,30 @@ export const useStore = create<AppState>((set) => ({
       return { visibilityMode: mode };
     }),
   setVisualListState: (visualList) => set({ visualList }),
+
+  simRate: 1,
+  simTimeMs: Date.now(),
+  triggerSimTimeJump: null,
+  setSimRate: (rate) =>
+    set((state) => {
+      simClock.setRate(rate);
+      state.triggerSimTimeJump?.();
+      return { simRate: rate, simTimeMs: simClock.now() };
+    }),
+  setSimTimeMs: (ms) => set({ simTimeMs: ms }),
+  jumpToSimTime: (date) =>
+    set((state) => {
+      simClock.jumpTo(date);
+      state.triggerSimTimeJump?.();
+      return { simTimeMs: simClock.now() };
+    }),
+  resetSimClock: () =>
+    set((state) => {
+      simClock.reset();
+      state.triggerSimTimeJump?.();
+      return { simRate: 1, simTimeMs: simClock.now() };
+    }),
+  setTriggerSimTimeJump: (fn) => set({ triggerSimTimeJump: fn }),
 
   setDsoObjects: (objects) =>
     set((state) => ({
