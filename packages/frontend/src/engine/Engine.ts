@@ -108,6 +108,7 @@ export class Engine {
   private readonly joyrideEntryTarget = new THREE.Vector3();
   private readonly trackingVelocity = new THREE.Vector3();
   private lastSimTimeUpdateAt = 0;
+  private snapNextPositions = false;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -430,18 +431,34 @@ export class Engine {
           const sunDir = getSunDirection(propagationDate);
           this.updateTleVelocityBuffers(msg.velocities);
 
-          const counts = this.satelliteRenderer.updatePositions(
-            msg.positions,
-            msg.validFlags,
-            this.objectCount,
-            observerPos,
-            sunDir,
-            state.visibilityMode,
-            this.catalogData,
-            state.categoryFilters,
-            state.regimeFilters,
-            this.visualNoradIds
-          );
+          const useSnap = this.snapNextPositions;
+          this.snapNextPositions = false;
+
+          const counts = useSnap
+            ? this.satelliteRenderer.snapPositions(
+                msg.positions,
+                msg.validFlags,
+                this.objectCount,
+                observerPos,
+                sunDir,
+                state.visibilityMode,
+                this.catalogData,
+                state.categoryFilters,
+                state.regimeFilters,
+                this.visualNoradIds
+              )
+            : this.satelliteRenderer.updatePositions(
+                msg.positions,
+                msg.validFlags,
+                this.objectCount,
+                observerPos,
+                sunDir,
+                state.visibilityMode,
+                this.catalogData,
+                state.categoryFilters,
+                state.regimeFilters,
+                this.visualNoradIds
+              );
 
           useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
@@ -828,11 +845,11 @@ export class Engine {
       return simClock.now();
     }
 
-    const elapsedMs = Math.min(
+    const wallElapsedMs = Math.min(
       Math.max(performance.now() - this.lastTickTime, 0),
-      1000,
+      this.getPropagationIntervalMs(),
     );
-    return this.lastPropagationTimestampMs + elapsedMs;
+    return this.lastPropagationTimestampMs + wallElapsedMs * simClock.getRate();
   }
 
   private getInterpolatedTleVelocity(index: number, t: number, out: THREE.Vector3): THREE.Vector3 {
@@ -883,8 +900,33 @@ export class Engine {
     return out;
   }
 
+  /**
+   * Propagation interval in wall-clock ms, scaled by sim rate.
+   * At 1x: 1000ms. At 10x+: 200ms (5 Hz) so satellites stay
+   * synced with Earth rotation and sun direction.
+   */
+  private getPropagationIntervalMs(): number {
+    const rate = Math.abs(simClock.getRate());
+    if (rate <= 1) return 1000;
+    // At higher rates, propagate faster (min 200ms = 5Hz wall-clock)
+    return Math.max(200, Math.round(1000 / rate));
+  }
+
+  private reschedulePropagation(): void {
+    if (this.propagationInterval !== null) {
+      clearInterval(this.propagationInterval);
+    }
+    const intervalMs = this.getPropagationIntervalMs();
+    this.propagationInterval = setInterval(() => {
+      this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+    }, intervalMs);
+  }
+
   /** Called by store actions on rate change, jumpTo, or reset. */
   private onSimTimeJump(): void {
+    // Next POSITIONS response should snap (no tween from old orbit state)
+    this.snapNextPositions = true;
+
     // Immediate TLE propagation at new sim-time
     this.worker?.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
 
@@ -901,6 +943,9 @@ export class Engine {
     // Reset interpolation state so we don't tween from old time
     this.lastTickTime = 0;
     this.satelliteRenderer.material.uniforms.uT.value = 0.0;
+
+    // Reschedule propagation cadence for new rate
+    this.reschedulePropagation();
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());
@@ -924,7 +969,8 @@ export class Engine {
     let uT = 0.0;
     if (this.lastTickTime > 0) {
       const elapsed = performance.now() - this.lastTickTime;
-      uT = Math.min(elapsed / 1000.0, 1.0);
+      const intervalMs = this.getPropagationIntervalMs();
+      uT = Math.min(elapsed / intervalMs, 1.0);
       this.satelliteRenderer.material.uniforms.uT.value = uT;
     }
 

@@ -44,6 +44,7 @@ class SimClock {
   }
 
   setRate(rate: number): void {
+    if (!Number.isFinite(rate)) return;
     this.ensureInitialized();
     const currentSimTime = this.now();
     this._simEpoch = currentSimTime;
@@ -52,8 +53,10 @@ class SimClock {
   }
 
   jumpTo(date: Date): void {
+    const ts = date.getTime();
+    if (!Number.isFinite(ts)) return;
     this.ensureInitialized();
-    this._simEpoch = date.getTime();
+    this._simEpoch = ts;
     this._epoch = Date.now();
   }
 

@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import { FallbackEarthSurface } from './FallbackEarthSurface';
 import { CoordinateBridge } from './CoordinateBridge';
 import type { GeospatialModule, FrameState } from './types';
+import { simClock } from '../SimClock';
 
 export class EarthGroupManager {
   /** The scene object — identical role to old EarthRenderer.object. */
@@ -101,7 +102,7 @@ export class EarthGroupManager {
     this._bridge.cameraToECEFMeters(camera.position, this._cameraPositionECEF);
 
     const frame: FrameState = {
-      date: new Date(),
+      date: simClock.date(),
       delta,
       gastRadians: this.object.rotation.y,
       sunDirectionECI: this.sunDirection,

@@ -125,6 +125,42 @@ export class SatelliteRenderer {
     return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds);
   }
 
+  /** Write positions into both previous and current buffers (no interpolation tween). */
+  snapPositions(
+    eciPositions: Float32Array,
+    validFlags: Uint8Array,
+    count: number,
+    observerPos: THREE.Vector3 | null,
+    sunDir: THREE.Vector3,
+    visibilityMode: VisibilityMode,
+    catalogData: EnrichedTLEObject[],
+    categoryFilters: Record<ObjectCategory, boolean>,
+    regimeFilters: Record<OrbitalRegime, boolean>,
+    visualNoradIds: Set<number>
+  ): { categoryCounts: Record<ObjectCategory, number>; regimeCounts: Record<OrbitalRegime, number> } {
+    const prevArr = this.prevPosAttr.array as Float32Array;
+    const currArr = this.currPosAttr.array as Float32Array;
+    this.validFlags.set(validFlags);
+
+    for (let i = 0; i < count; i++) {
+      const i3 = i * 3;
+      const x = eciPositions[i3];
+      const y = eciPositions[i3 + 2];
+      const z = -eciPositions[i3 + 1];
+      currArr[i3] = x;
+      currArr[i3 + 1] = y;
+      currArr[i3 + 2] = z;
+      prevArr[i3] = x;
+      prevArr[i3 + 1] = y;
+      prevArr[i3 + 2] = z;
+    }
+
+    this.prevPosAttr.needsUpdate = true;
+    this.currPosAttr.needsUpdate = true;
+
+    return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds);
+  }
+
   setSatelliteColor(index: number, r: number, g: number, b: number): void {
     const colorArr = this.colorAttr.array as Float32Array;
     colorArr[index * 3] = r;
