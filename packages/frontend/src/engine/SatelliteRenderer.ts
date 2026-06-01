@@ -121,8 +121,8 @@ export class SatelliteRenderer {
 
     this.prevPosAttr.needsUpdate = true;
     this.currPosAttr.needsUpdate = true;
-    
-    return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds);
+
+    return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds, false);
   }
 
   /** Write positions into both previous and current buffers (no interpolation tween). */
@@ -158,7 +158,7 @@ export class SatelliteRenderer {
     this.prevPosAttr.needsUpdate = true;
     this.currPosAttr.needsUpdate = true;
 
-    return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds);
+    return this.applyVisibilityAndFilters(count, observerPos, sunDir, visibilityMode, catalogData, categoryFilters, regimeFilters, visualNoradIds, true);
   }
 
   setSatelliteColor(index: number, r: number, g: number, b: number): void {
@@ -232,13 +232,16 @@ export class SatelliteRenderer {
     catalogData: EnrichedTLEObject[],
     categoryFilters: Record<ObjectCategory, boolean>,
     regimeFilters: Record<OrbitalRegime, boolean>,
-    visualNoradIds: Set<number>
+    visualNoradIds: Set<number>,
+    snap = false
   ): { categoryCounts: Record<ObjectCategory, number>; regimeCounts: Record<OrbitalRegime, number> } {
     const prevSizeArr = this.prevSizeAttr.array as Float32Array;
     const currSizeArr = this.currSizeAttr.array as Float32Array;
     const currArr = this.currPosAttr.array as Float32Array;
 
-    prevSizeArr.set(currSizeArr);
+    if (!snap) {
+      prevSizeArr.set(currSizeArr);
+    }
 
     const catCounts: Record<ObjectCategory, number> = {
       active_satellite: 0, inactive_satellite: 0, rocket_body: 0, debris: 0, unknown: 0, deep_space: 0,
@@ -370,6 +373,9 @@ export class SatelliteRenderer {
       }
     }
 
+    if (snap) {
+      prevSizeArr.set(currSizeArr);
+    }
     this.prevSizeAttr.needsUpdate = true;
     this.currSizeAttr.needsUpdate = true;
     return { categoryCounts: catCounts, regimeCounts: regCounts };

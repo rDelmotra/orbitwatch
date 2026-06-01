@@ -1,6 +1,6 @@
 import { useStore } from '../store/useStore';
 
-const RATE_OPTIONS = [1, 10, 100, 1000] as const;
+const RATE_OPTIONS = [1, 2, 5, 10] as const;
 
 const containerStyle: React.CSSProperties = {
   position: 'absolute',

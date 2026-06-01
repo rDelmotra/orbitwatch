@@ -22,7 +22,7 @@ interface TLEInput {
 
 type WorkerInMessage =
     | { type: 'INIT'; tles: TLEInput[]; startIndex: number }
-    | { type: 'PROPAGATE'; timestamp: number };
+    | { type: 'PROPAGATE'; timestamp: number; seq: number };
 
 type WorkerOutMessage =
     | { type: 'READY'; objectCount: number }
@@ -33,6 +33,7 @@ type WorkerOutMessage =
         validFlags: Uint8Array;
         startIndex: number;
         timestamp: number;
+        seq: number;
     };
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -102,7 +103,7 @@ self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
             handleInit(msg.tles, msg.startIndex);
             break;
         case 'PROPAGATE':
-            handlePropagate(msg.timestamp);
+            handlePropagate(msg.timestamp, msg.seq);
             break;
     }
 };
@@ -131,7 +132,7 @@ function handleInit(tles: TLEInput[], start: number): void {
 
 // ── PROPAGATE ────────────────────────────────────────────────────────────────
 
-function handlePropagate(timestamp: number): void {
+function handlePropagate(timestamp: number, seq: number): void {
     const date = new Date(timestamp);
 
     const { positions, velocities, validFlags } = getActiveBuffers();
@@ -187,6 +188,7 @@ function handlePropagate(timestamp: number): void {
         validFlags,
         startIndex,
         timestamp,
+        seq,
     };
 
     (self as unknown as Worker).postMessage(reply, [

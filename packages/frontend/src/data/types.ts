@@ -27,7 +27,7 @@ export interface EnrichedTLEObject {
 
 export type WorkerInMessage =
     | { type: 'INIT'; tles: TLEInput[]; startIndex: number }
-    | { type: 'PROPAGATE'; timestamp: number }
+    | { type: 'PROPAGATE'; timestamp: number; seq: number }
 
 export type WorkerOutMessage =
     | { type: 'READY'; objectCount: number }
@@ -38,4 +38,5 @@ export type WorkerOutMessage =
       validFlags: Uint8Array;
       startIndex: number;
       timestamp: number;
+      seq: number;
     }

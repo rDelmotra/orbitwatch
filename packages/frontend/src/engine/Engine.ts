@@ -108,7 +108,8 @@ export class Engine {
   private readonly joyrideEntryTarget = new THREE.Vector3();
   private readonly trackingVelocity = new THREE.Vector3();
   private lastSimTimeUpdateAt = 0;
-  private snapNextPositions = false;
+  private propagationSeq = 0;
+  private snapAtOrAfterSeq = -1;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -420,9 +421,9 @@ export class Engine {
           this.objectCount = msg.objectCount;
           console.log(`SGP4 worker ready: ${this.objectCount} objects`);
           useStore.getState().setLoadingPhase('propagating');
-          this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+          this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
           this.propagationInterval = setInterval(() => {
-            this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+            this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
           }, 1000);
         } else if (msg.type === 'POSITIONS') {
           const state = useStore.getState();
@@ -431,8 +432,10 @@ export class Engine {
           const sunDir = getSunDirection(propagationDate);
           this.updateTleVelocityBuffers(msg.velocities);
 
-          const useSnap = this.snapNextPositions;
-          this.snapNextPositions = false;
+          const useSnap = this.snapAtOrAfterSeq >= 0 && msg.seq >= this.snapAtOrAfterSeq;
+          if (useSnap) {
+            this.snapAtOrAfterSeq = -1;
+          }
 
           const counts = useSnap
             ? this.satelliteRenderer.snapPositions(
@@ -918,17 +921,16 @@ export class Engine {
     }
     const intervalMs = this.getPropagationIntervalMs();
     this.propagationInterval = setInterval(() => {
-      this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+      this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
     }, intervalMs);
   }
 
   /** Called by store actions on rate change, jumpTo, or reset. */
   private onSimTimeJump(): void {
-    // Next POSITIONS response should snap (no tween from old orbit state)
-    this.snapNextPositions = true;
-
-    // Immediate TLE propagation at new sim-time
-    this.worker?.postMessage({ type: 'PROPAGATE', timestamp: simClock.now() });
+    // Immediate TLE propagation at new sim-time; snap the response (no tween)
+    const jumpSeq = ++this.propagationSeq;
+    this.snapAtOrAfterSeq = jumpSeq;
+    this.worker?.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: jumpSeq });
 
     // Immediate DSO tick at new sim-time
     if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
