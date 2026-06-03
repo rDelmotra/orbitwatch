@@ -19,8 +19,7 @@ import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
-import { Sgp4WorkerClient } from './tle/Sgp4WorkerClient';
-import type { Sgp4PositionResult } from './tle/Sgp4WorkerClient';
+import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
 
@@ -29,6 +28,8 @@ const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 export class Engine {
+  private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
+
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
@@ -41,7 +42,6 @@ export class Engine {
   private dsoRenderer: DsoRenderer;
   private sgp4Client: Sgp4WorkerClient | null = null;
   private dsoClient: DsoWorkerClient | null = null;
-  private objectCount = 0;
   private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -376,8 +376,7 @@ export class Engine {
 
       this.sgp4Client = new Sgp4WorkerClient(tles, {
         onReady: (objectCount) => {
-          this.objectCount = objectCount;
-          console.log(`SGP4 worker ready: ${this.objectCount} objects`);
+          console.log(`SGP4 worker ready: ${objectCount} objects`);
           useStore.getState().setLoadingPhase('propagating');
         },
         onPositions: (result) => this.onSgp4Positions(result),
@@ -518,9 +517,8 @@ export class Engine {
   }
 
   private getVisualNoradIds(): Set<number> {
-    return this.visualListPoller?.visualNoradIds ?? this.emptySet;
+    return this.visualListPoller?.visualNoradIds ?? Engine.EMPTY_NORAD_SET;
   }
-  private readonly emptySet: Set<number> = new Set();
 
   private applyVisualListResult(result: VisualListResolvedResult): void {
     const store = useStore.getState();
@@ -944,7 +942,6 @@ export class Engine {
       this.observerMarker = null;
     }
   }
-
 
   private onResize = (): void => {
     const canvas = this.renderer.domElement;
