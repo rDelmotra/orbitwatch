@@ -5,13 +5,13 @@ import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import {
-  fetchVisualList,
   reconcileVisibilityModeForVisualStatus,
   type VisualListResolvedResult,
 } from '../data/visualList';
+import { fetchTleCatalog, VisualListPoller } from '../data/tle-client';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
-import type { TLEInput, EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
+import type { EnrichedTLEObject } from '../data/types';
 import { useStore, type TrackingStyle } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
@@ -25,7 +25,6 @@ import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
 
 const EARTH_RADIUS_KM = 6371;
-const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
@@ -60,10 +59,7 @@ export class Engine {
   private returnEndPos: THREE.Vector3 | null = null;
   private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
   private useHardReset = false;
-  private visualNoradIds: Set<number> = new Set();
-  private visualListEtag: string | null = null;
-  private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
-  private visualRefreshInFlight = false;
+  private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
   private readonly trackingRadialDir = new THREE.Vector3();
   private readonly trackingEndCamPos = new THREE.Vector3();
@@ -208,6 +204,8 @@ export class Engine {
     try {
       store.setLoadingPhase('fetching');
       const apiUrl = import.meta.env.VITE_API_URL ?? '';
+
+      // Visual list poller — non-blocking, starts in background
       store.setVisualListState({
         status: 'loading',
         version: null,
@@ -217,36 +215,15 @@ export class Engine {
         updatedAt: null,
         message: null,
       });
-      this.startVisualRefreshLoop(apiUrl);
-      // Keep visual list refresh non-blocking for TLE bootstrap.
-      void this.refreshVisualList(apiUrl);
+      this.visualListPoller = new VisualListPoller(apiUrl, (result) => {
+        this.applyVisualListResult(result);
+      });
+      this.visualListPoller.start();
 
-      const res = await fetch(`${apiUrl}/api/tle/all`);
-      if (!res.ok) throw new Error(`TLE fetch failed: ${res.status}`);
+      // TLE catalog fetch (pure — no store side effects)
+      const catalog = await fetchTleCatalog(apiUrl);
+      const { catalogData, tles, categoryCounts, regimeCounts } = catalog;
 
-      const response = await res.json();
-      const catalogData: EnrichedTLEObject[] = response.data;
-      const tles: TLEInput[] = catalogData.map((d) => ({
-        noradId: d.noradId,
-        line1: d.line1,
-        line2: d.line2,
-      }));
-
-      const categoryCounts: Record<ObjectCategory, number> = {
-        active_satellite: 0,
-        inactive_satellite: 0,
-        rocket_body: 0,
-        debris: 0,
-        unknown: 0,
-        deep_space: 0,
-      };
-      const regimeCounts: Record<OrbitalRegime, number> = {
-        LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0,
-      };
-      for (const obj of catalogData) {
-        categoryCounts[obj.category] = (categoryCounts[obj.category] ?? 0) + 1;
-        regimeCounts[obj.regime] = (regimeCounts[obj.regime] ?? 0) + 1;
-      }
       useStore.getState().setCatalogInfo({
         objectCount: catalogData.length,
         categoryCounts,
@@ -430,7 +407,7 @@ export class Engine {
           this.catalogData,
           state.categoryFilters,
           state.regimeFilters,
-          this.visualNoradIds
+          this.getVisualNoradIds()
         )
       : this.satelliteRenderer.updatePositions(
           result.positions,
@@ -442,7 +419,7 @@ export class Engine {
           this.catalogData,
           state.categoryFilters,
           state.regimeFilters,
-          this.visualNoradIds
+          this.getVisualNoradIds()
         );
 
     useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
@@ -460,16 +437,6 @@ export class Engine {
       this.inputManager?.setFirstPositionReceived(true);
       useStore.getState().setLoadingPhase('ready');
     }
-  }
-
-  private startVisualRefreshLoop(apiUrl: string): void {
-    if (this.visualRefreshInterval !== null) {
-      clearInterval(this.visualRefreshInterval);
-    }
-
-    this.visualRefreshInterval = setInterval(() => {
-      void this.refreshVisualList(apiUrl);
-    }, VISUAL_REFRESH_INTERVAL_MS);
   }
 
   private getObserverScenePositionForState(
@@ -504,7 +471,7 @@ export class Engine {
       observerPos,
       sunDir,
       state.visibilityMode,
-      this.visualNoradIds,
+      this.getVisualNoradIds(),
     );
     useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
@@ -550,9 +517,13 @@ export class Engine {
     return { observerWorldPos, upDir };
   }
 
+  private getVisualNoradIds(): Set<number> {
+    return this.visualListPoller?.visualNoradIds ?? this.emptySet;
+  }
+  private readonly emptySet: Set<number> = new Set();
+
   private applyVisualListResult(result: VisualListResolvedResult): void {
     const store = useStore.getState();
-    this.visualNoradIds = result.ids;
 
     store.setVisualListState({
       status: result.status,
@@ -573,41 +544,6 @@ export class Engine {
     }
 
     this.recomputeVisibleCounts(useStore.getState());
-  }
-
-  private async refreshVisualList(apiUrl: string): Promise<void> {
-    if (this.visualRefreshInFlight) {
-      return;
-    }
-
-    this.visualRefreshInFlight = true;
-    try {
-      const result = await fetchVisualList({
-        apiBase: apiUrl,
-        etag: this.visualListEtag,
-      });
-
-      if (result.kind === 'not_modified') {
-        return;
-      }
-
-      this.visualListEtag = result.etag ?? this.visualListEtag;
-      this.applyVisualListResult(result);
-    } catch (err) {
-      console.warn('Visual list refresh error:', err);
-      this.applyVisualListResult({
-        kind: 'resolved',
-        ids: new Set(),
-        status: 'unavailable',
-        source: null,
-        stale: false,
-        version: null,
-        etag: this.visualListEtag,
-        message: 'Visual list refresh failed unexpectedly.',
-      });
-    } finally {
-      this.visualRefreshInFlight = false;
-    }
   }
 
   private refreshOrbitTrail(
@@ -1025,10 +961,7 @@ export class Engine {
       cancelAnimationFrame(this.animationId);
     }
     this.sgp4Client?.dispose();
-    if (this.visualRefreshInterval !== null) {
-      clearInterval(this.visualRefreshInterval);
-      this.visualRefreshInterval = null;
-    }
+    this.visualListPoller?.dispose();
     this.cameraModeUnsub?.();
     this.filterUnsub?.();
     this.trailUnsub?.();
