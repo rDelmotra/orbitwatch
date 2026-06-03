@@ -18,42 +18,16 @@ import { OrbitTrailRenderer } from './OrbitTrailRenderer';
 import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
-import type { DsoSnapshot } from '../data/dso-types';
 import { simClock } from './SimClock';
 import { Sgp4WorkerClient } from './tle/Sgp4WorkerClient';
 import type { Sgp4PositionResult } from './tle/Sgp4WorkerClient';
+import { DsoWorkerClient } from './dso/DsoWorkerClient';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
-const DSO_VALID_TO_GRACE_SEC = 600;
-const DSO_TRAIL_POINTS = 360;
-const DSO_WORKER_RESTART_DELAY_MS = 500;
-const DSO_WORKER_STALL_TIMEOUT_MS = 5000;
 const VISUAL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
 const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
-
-type DsoWorkerInMessage =
-  | {
-    type: 'INIT_SNAPSHOTS';
-    dsoIds: string[];
-    snapshots: Record<string, DsoSnapshot>;
-    validToGraceSec?: number;
-  }
-  | { type: 'SET_DSO_IDS'; dsoIds: string[] }
-  | { type: 'UPDATE_SNAPSHOT'; dsoId: string; snapshot: DsoSnapshot | null }
-  | { type: 'SET_VALID_TO_GRACE_SEC'; validToGraceSec: number }
-  | { type: 'TICK'; timestamp: number }
-  | { type: 'BUILD_TRAIL'; dsoId: string; pointCount?: number };
-
-type DsoWorkerOutMessage =
-  | {
-    type: 'POSITIONS';
-    positions: Float32Array;
-    velocities: Float32Array;
-    visibleFlags: Uint8Array;
-  }
-  | { type: 'TRAIL'; dsoId: string; positions: Float32Array };
 
 export class Engine {
   private renderer: THREE.WebGLRenderer;
@@ -67,12 +41,7 @@ export class Engine {
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
   private sgp4Client: Sgp4WorkerClient | null = null;
-  private dsoWorker: Worker | null = null;
-  private dsoWorkerTickInFlight = false;
-  private dsoWorkerLastTickSentAt = 0;
-  private dsoWorkerRestartTimer: ReturnType<typeof setTimeout> | null = null;
-  private dsoWorkerKnownIds = new Set<string>();
-  private dsoWorkerKnownSnapshotVersions = new Map<string, string>();
+  private dsoClient: DsoWorkerClient | null = null;
   private objectCount = 0;
   private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
@@ -99,7 +68,6 @@ export class Engine {
   private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private visualRefreshInFlight = false;
   private observerMarker: THREE.Group | null = null;
-  private dsoVelocitiesTeme: Float32Array | null = null;
   private readonly trackingRadialDir = new THREE.Vector3();
   private readonly trackingEndCamPos = new THREE.Vector3();
   private readonly joyrideEntryTarget = new THREE.Vector3();
@@ -304,7 +272,17 @@ export class Engine {
         this.satelliteRenderer.setSatelliteSize(issIndex, 2.0);
       }
 
-      this.initDsoWorker();
+      this.dsoClient = new DsoWorkerClient({
+        onPositions: (positions, _velocities, visibleFlags) => {
+          this.dsoRenderer.updateFromWorkerBuffers(positions, visibleFlags);
+        },
+        onTrail: (dsoId, positions) => {
+          // Gate: only apply if trail is active and this DSO is selected
+          const state = useStore.getState();
+          if (!state.showOrbitTrail || state.selectedDso?.dsoId !== dsoId) return;
+          this.orbitTrailRenderer.generateFromPositions(positions);
+        },
+      });
 
       // ── DSO catalog subscription ────────────────────────────────────────────
       // Re-init DSO renderer whenever dsoObjects changes in the store.
@@ -315,7 +293,7 @@ export class Engine {
           prevDsoObjects = state.dsoObjects;
           this.dsoRenderer.init(state.dsoObjects, this.catalogData.length);
           this.gpuPicker?.addDsoGeometry(this.dsoRenderer.geometry, state.dsoObjects.length);
-          this.syncDsoWorkerIds(state.dsoObjects.map((dso) => dso.dsoId));
+          this.dsoClient?.syncIds(state.dsoObjects.map((dso) => dso.dsoId));
           if (state.showOrbitTrail) {
             this.refreshOrbitTrail(state);
           }
@@ -324,10 +302,10 @@ export class Engine {
       let prevDsoEphemeris = useStore.getState().dsoEphemerisById;
       this.dsoEphemerisUnsub = useStore.subscribe((state) => {
         if (state.dsoEphemerisById !== prevDsoEphemeris) {
-          this.syncDsoWorkerEphemerisDiff(prevDsoEphemeris, state.dsoEphemerisById);
+          this.dsoClient?.syncEphemerisDiff(prevDsoEphemeris, state.dsoEphemerisById);
           prevDsoEphemeris = state.dsoEphemerisById;
           if (state.showOrbitTrail && state.selectedDso) {
-            this.requestDsoTrail(state.selectedDso.dsoId);
+            this.dsoClient?.requestTrail(state.selectedDso.dsoId);
           }
         }
       });
@@ -617,159 +595,6 @@ export class Engine {
     }
   }
 
-  private initDsoWorker(): void {
-    this.dsoWorker?.terminate();
-    this.dsoWorkerTickInFlight = false;
-    this.dsoWorkerLastTickSentAt = 0;
-    this.dsoVelocitiesTeme = null;
-    this.dsoWorkerKnownIds.clear();
-    this.dsoWorkerKnownSnapshotVersions.clear();
-
-    this.dsoWorker = new Worker(
-      new URL('../workers/dso.worker.ts', import.meta.url),
-      { type: 'module' },
-    );
-
-    this.dsoWorker.onmessage = (event: MessageEvent<DsoWorkerOutMessage>) => {
-      const msg = event.data;
-      if (msg.type === 'POSITIONS') {
-        this.dsoWorkerTickInFlight = false;
-        this.dsoWorkerLastTickSentAt = 0;
-        this.dsoVelocitiesTeme = msg.velocities;
-        this.dsoRenderer.updateFromWorkerBuffers(msg.positions, msg.visibleFlags);
-        return;
-      }
-
-      const state = useStore.getState();
-      if (!state.showOrbitTrail || state.selectedDso?.dsoId !== msg.dsoId) {
-        return;
-      }
-      this.orbitTrailRenderer.generateFromPositions(msg.positions);
-    };
-
-    this.dsoWorker.onerror = (event) => {
-      console.error('DSO worker error:', event);
-      this.dsoWorkerTickInFlight = false;
-      this.scheduleDsoWorkerRestart();
-    };
-
-    this.dsoWorker.onmessageerror = (event) => {
-      console.error('DSO worker message error:', event);
-      this.dsoWorkerTickInFlight = false;
-      this.scheduleDsoWorkerRestart();
-    };
-
-    this.bootstrapDsoWorkerState();
-  }
-
-  private scheduleDsoWorkerRestart(): void {
-    if (this.dsoWorkerRestartTimer !== null) {
-      return;
-    }
-
-    this.dsoWorkerRestartTimer = setTimeout(() => {
-      this.dsoWorkerRestartTimer = null;
-      this.initDsoWorker();
-    }, DSO_WORKER_RESTART_DELAY_MS);
-  }
-
-  private bootstrapDsoWorkerState(): void {
-    if (!this.dsoWorker) {
-      return;
-    }
-
-    const state = useStore.getState();
-    const dsoIds = state.dsoObjects.map((dso) => dso.dsoId);
-    this.dsoWorker.postMessage({
-      type: 'INIT_SNAPSHOTS',
-      dsoIds,
-      snapshots: state.dsoEphemerisById,
-      validToGraceSec: DSO_VALID_TO_GRACE_SEC,
-    } satisfies DsoWorkerInMessage);
-    this.dsoWorker.postMessage({
-      type: 'SET_VALID_TO_GRACE_SEC',
-      validToGraceSec: DSO_VALID_TO_GRACE_SEC,
-    } satisfies DsoWorkerInMessage);
-
-    this.dsoWorkerKnownIds = new Set(dsoIds);
-    this.dsoWorkerKnownSnapshotVersions.clear();
-    for (const [dsoId, snapshot] of Object.entries(state.dsoEphemerisById)) {
-      this.dsoWorkerKnownSnapshotVersions.set(dsoId, snapshot.snapshotVersion);
-    }
-  }
-
-  private syncDsoWorkerIds(nextIds: string[]): void {
-    if (!this.dsoWorker) {
-      return;
-    }
-
-    const sameSize = this.dsoWorkerKnownIds.size === nextIds.length;
-    const sameMembers = sameSize && nextIds.every((id) => this.dsoWorkerKnownIds.has(id));
-    if (!sameMembers) {
-      this.dsoWorker.postMessage({
-        type: 'SET_DSO_IDS',
-        dsoIds: nextIds,
-      } satisfies DsoWorkerInMessage);
-      this.dsoWorkerKnownIds = new Set(nextIds);
-    }
-
-    for (const knownId of Array.from(this.dsoWorkerKnownSnapshotVersions.keys())) {
-      if (!this.dsoWorkerKnownIds.has(knownId)) {
-        this.dsoWorkerKnownSnapshotVersions.delete(knownId);
-      }
-    }
-  }
-
-  private syncDsoWorkerEphemerisDiff(
-    prev: Record<string, DsoSnapshot>,
-    next: Record<string, DsoSnapshot>,
-  ): void {
-    if (!this.dsoWorker) {
-      return;
-    }
-
-    const touchedIds = new Set<string>([
-      ...Object.keys(prev),
-      ...Object.keys(next),
-    ]);
-
-    for (const dsoId of touchedIds) {
-      const prevSnapshot = prev[dsoId];
-      const nextSnapshot = next[dsoId];
-      const prevVersion = prevSnapshot?.snapshotVersion ?? null;
-      const nextVersion = nextSnapshot?.snapshotVersion ?? null;
-
-      if (prevVersion === nextVersion) {
-        continue;
-      }
-
-      this.dsoWorker.postMessage({
-        type: 'UPDATE_SNAPSHOT',
-        dsoId,
-        snapshot: nextSnapshot ?? null,
-      } satisfies DsoWorkerInMessage);
-
-      if (nextSnapshot) {
-        this.dsoWorkerKnownSnapshotVersions.set(dsoId, nextSnapshot.snapshotVersion);
-      } else {
-        this.dsoWorkerKnownSnapshotVersions.delete(dsoId);
-      }
-    }
-  }
-
-  private requestDsoTrail(dsoId: string): void {
-    if (!this.dsoWorker) {
-      this.orbitTrailRenderer.clear();
-      return;
-    }
-
-    this.dsoWorker.postMessage({
-      type: 'BUILD_TRAIL',
-      dsoId,
-      pointCount: DSO_TRAIL_POINTS,
-    } satisfies DsoWorkerInMessage);
-  }
-
   private refreshOrbitTrail(
     state: ReturnType<typeof useStore.getState> = useStore.getState(),
   ): void {
@@ -790,31 +615,11 @@ export class Engine {
     }
 
     if (state.selectedDso) {
-      this.requestDsoTrail(state.selectedDso.dsoId);
+      this.dsoClient?.requestTrail(state.selectedDso.dsoId);
       return;
     }
 
     this.orbitTrailRenderer.clear();
-  }
-
-  private getDsoVelocity(dsoIndex: number, out: THREE.Vector3): THREE.Vector3 {
-    if (this.dsoVelocitiesTeme === null || dsoIndex < 0) {
-      out.set(0, 0, 0);
-      return out;
-    }
-
-    const i3 = dsoIndex * 3;
-    if (i3 + 2 >= this.dsoVelocitiesTeme.length) {
-      out.set(0, 0, 0);
-      return out;
-    }
-
-    const vx = this.dsoVelocitiesTeme[i3];
-    const vy = this.dsoVelocitiesTeme[i3 + 1];
-    const vz = this.dsoVelocitiesTeme[i3 + 2];
-    // TEME -> Three.js axis swap (x, z, -y)
-    out.set(vx, vz, -vy);
-    return out;
   }
 
   /** Called by store actions on rate change, jumpTo, or reset. */
@@ -824,14 +629,7 @@ export class Engine {
     this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
     // Immediate DSO tick at new sim-time
-    if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
-      this.dsoWorker.postMessage({
-        type: 'TICK',
-        timestamp: simClock.now(),
-      } satisfies DsoWorkerInMessage);
-      this.dsoWorkerTickInFlight = true;
-      this.dsoWorkerLastTickSentAt = performance.now();
-    }
+    this.dsoClient?.triggerImmediateTick(simClock.now());
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());
@@ -860,23 +658,7 @@ export class Engine {
 
     // ── DSO position update (worker-driven) ───────────────────────────────────
     const store = useStore.getState();
-    if (
-      this.dsoWorker &&
-      this.dsoWorkerTickInFlight &&
-      performance.now() - this.dsoWorkerLastTickSentAt > DSO_WORKER_STALL_TIMEOUT_MS
-    ) {
-      console.warn('DSO worker tick timed out; restarting worker');
-      this.dsoWorkerTickInFlight = false;
-      this.scheduleDsoWorkerRestart();
-    }
-    if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
-      this.dsoWorker.postMessage({
-        type: 'TICK',
-        timestamp: simClock.now(),
-      } satisfies DsoWorkerInMessage);
-      this.dsoWorkerTickInFlight = true;
-      this.dsoWorkerLastTickSentAt = performance.now();
-    }
+    this.dsoClient?.tick(simClock.now());
     // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
     const wallNow = performance.now();
     if (wallNow - this.lastSimTimeUpdateAt > 250) {
@@ -948,7 +730,7 @@ export class Engine {
         let endCamPos: THREE.Vector3;
         let endTarget: THREE.Vector3;
         if (trackingStyle === 'joyride') {
-          this.getDsoVelocity(dsoIndex, this.trackingVelocity);
+          this.dsoClient!.getDsoVelocity(dsoIndex, this.trackingVelocity);
           endCamPos = dsoPos;
           this.cameraController.getJoyrideEntryTarget(dsoPos, this.trackingVelocity, this.joyrideEntryTarget);
           endTarget = this.joyrideEntryTarget;
@@ -987,7 +769,7 @@ export class Engine {
       if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
         const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
         if (trackingStyle === 'joyride') {
-          this.getDsoVelocity(dsoIndex, this.trackingVelocity);
+          this.dsoClient!.getDsoVelocity(dsoIndex, this.trackingVelocity);
           this.cameraController.updateJoyride(dsoPos, this.trackingVelocity, this.controls.target);
         } else {
           this.cameraController.updateFollow(dsoPos, this.controls.target);
@@ -1419,17 +1201,8 @@ export class Engine {
     this.trailUnsub?.();
     this.dsoUnsub?.();
     this.dsoEphemerisUnsub?.();
-    this.dsoWorker?.terminate();
+    this.dsoClient?.dispose();
     this.joyrideLookPointerPos = null;
-    this.dsoWorkerTickInFlight = false;
-    this.dsoWorkerLastTickSentAt = 0;
-    this.dsoVelocitiesTeme = null;
-    this.dsoWorkerKnownIds.clear();
-    this.dsoWorkerKnownSnapshotVersions.clear();
-    if (this.dsoWorkerRestartTimer !== null) {
-      clearTimeout(this.dsoWorkerRestartTimer);
-      this.dsoWorkerRestartTimer = null;
-    }
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);

@@ -1,31 +1,10 @@
 import { interpolateDsoPosition } from '../data/dso-interpolator';
 import type { DsoSnapshot } from '../data/dso-types';
+import type { DsoWorkerInMessage as WorkerInMessage, DsoWorkerOutMessage as WorkerOutMessage } from '../engine/dso/dso-worker-types';
 
 const DEFAULT_VALID_TO_GRACE_SEC = 600;
 const DEFAULT_TRAIL_POINTS = 360;
 const MAX_TRAIL_POINTS = 2048;
-
-type WorkerInMessage =
-  | {
-      type: 'INIT_SNAPSHOTS';
-      dsoIds: string[];
-      snapshots: Record<string, DsoSnapshot>;
-      validToGraceSec?: number;
-    }
-  | { type: 'SET_DSO_IDS'; dsoIds: string[] }
-  | { type: 'UPDATE_SNAPSHOT'; dsoId: string; snapshot: DsoSnapshot | null }
-  | { type: 'SET_VALID_TO_GRACE_SEC'; validToGraceSec: number }
-  | { type: 'TICK'; timestamp: number }
-  | { type: 'BUILD_TRAIL'; dsoId: string; pointCount?: number };
-
-type WorkerOutMessage =
-  | {
-      type: 'POSITIONS';
-      positions: Float32Array;
-      velocities: Float32Array;
-      visibleFlags: Uint8Array;
-    }
-  | { type: 'TRAIL'; dsoId: string; positions: Float32Array };
 
 let dsoIds: string[] = [];
 let snapshotsById: Record<string, DsoSnapshot> = {};
