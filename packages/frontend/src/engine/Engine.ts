@@ -11,7 +11,7 @@ import {
 } from '../data/visualList';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
-import type { TLEInput, EnrichedTLEObject, WorkerOutMessage, ObjectCategory, OrbitalRegime } from '../data/types';
+import type { TLEInput, EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
 import { useStore, type TrackingStyle } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
@@ -20,6 +20,8 @@ import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import type { DsoSnapshot } from '../data/dso-types';
 import { simClock } from './SimClock';
+import { Sgp4WorkerClient } from './tle/Sgp4WorkerClient';
+import type { Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
@@ -64,16 +66,14 @@ export class Engine {
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
-  private worker: Worker | null = null;
+  private sgp4Client: Sgp4WorkerClient | null = null;
   private dsoWorker: Worker | null = null;
   private dsoWorkerTickInFlight = false;
   private dsoWorkerLastTickSentAt = 0;
   private dsoWorkerRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private dsoWorkerKnownIds = new Set<string>();
   private dsoWorkerKnownSnapshotVersions = new Map<string, string>();
-  private propagationInterval: ReturnType<typeof setInterval> | null = null;
   private objectCount = 0;
-  private lastTickTime = 0;
   private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -99,17 +99,12 @@ export class Engine {
   private visualRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private visualRefreshInFlight = false;
   private observerMarker: THREE.Group | null = null;
-  private lastPropagationTimestampMs = 0;
-  private prevTleVelocitiesTeme: Float32Array | null = null;
-  private currTleVelocitiesTeme: Float32Array | null = null;
   private dsoVelocitiesTeme: Float32Array | null = null;
   private readonly trackingRadialDir = new THREE.Vector3();
   private readonly trackingEndCamPos = new THREE.Vector3();
   private readonly joyrideEntryTarget = new THREE.Vector3();
   private readonly trackingVelocity = new THREE.Vector3();
   private lastSimTimeUpdateAt = 0;
-  private propagationSeq = 0;
-  private snapAtOrAfterSeq = -1;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -410,84 +405,67 @@ export class Engine {
       console.log(`Loaded ${tles.length} TLEs from backend`);
       useStore.getState().setLoadingPhase('initializing');
 
-      this.worker = new Worker(
-        new URL('../workers/sgp4.worker.ts', import.meta.url),
-        { type: 'module' },
-      );
-
-      this.worker.onmessage = (e: MessageEvent<WorkerOutMessage>) => {
-        const msg = e.data;
-        if (msg.type === 'READY') {
-          this.objectCount = msg.objectCount;
+      this.sgp4Client = new Sgp4WorkerClient(tles, {
+        onReady: (objectCount) => {
+          this.objectCount = objectCount;
           console.log(`SGP4 worker ready: ${this.objectCount} objects`);
           useStore.getState().setLoadingPhase('propagating');
-          this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
-          this.propagationInterval = setInterval(() => {
-            this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
-          }, 1000);
-        } else if (msg.type === 'POSITIONS') {
-          const state = useStore.getState();
-          const propagationDate = new Date(msg.timestamp);
-          const observerPos = this.getObserverScenePositionForState(state, propagationDate);
-          const sunDir = getSunDirection(propagationDate);
-          this.updateTleVelocityBuffers(msg.velocities);
-
-          const useSnap = this.snapAtOrAfterSeq >= 0 && msg.seq >= this.snapAtOrAfterSeq;
-          if (useSnap) {
-            this.snapAtOrAfterSeq = -1;
-          }
-
-          const counts = useSnap
-            ? this.satelliteRenderer.snapPositions(
-                msg.positions,
-                msg.validFlags,
-                this.objectCount,
-                observerPos,
-                sunDir,
-                state.visibilityMode,
-                this.catalogData,
-                state.categoryFilters,
-                state.regimeFilters,
-                this.visualNoradIds
-              )
-            : this.satelliteRenderer.updatePositions(
-                msg.positions,
-                msg.validFlags,
-                this.objectCount,
-                observerPos,
-                sunDir,
-                state.visibilityMode,
-                this.catalogData,
-                state.categoryFilters,
-                state.regimeFilters,
-                this.visualNoradIds
-              );
-
-          useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
-
-          this.lastPropagationTimestampMs = msg.timestamp;
-          this.lastTickTime = performance.now();
-          this.satelliteRenderer.material.uniforms.uT.value = 0.0;
-
-          if (state.showOrbitTrail && state.selectedIndex !== null) {
-            this.refreshOrbitTrail(state);
-          }
-
-          this.devValidation?.runChecks(msg.positions, msg.validFlags, this.objectCount);
-
-          if (!this.firstPositionReceived) {
-            this.firstPositionReceived = true;
-            useStore.getState().setLoadingPhase('ready');
-          }
-        }
-      };
-
-      this.worker.postMessage({ type: 'INIT', tles, startIndex: 0 });
+        },
+        onPositions: (result) => this.onSgp4Positions(result),
+      });
     } catch (err) {
       console.error('Failed to initialize SGP4 worker:', err);
       useStore.getState().setLoadingError(
         err instanceof Error ? err.message : 'Failed to load satellite data',
       );
+    }
+  }
+
+  private onSgp4Positions(result: Sgp4PositionResult): void {
+    const state = useStore.getState();
+    const propagationDate = new Date(result.timestamp);
+    const observerPos = this.getObserverScenePositionForState(state, propagationDate);
+    const sunDir = getSunDirection(propagationDate);
+
+    const counts = result.isSnap
+      ? this.satelliteRenderer.snapPositions(
+          result.positions,
+          result.validFlags,
+          result.objectCount,
+          observerPos,
+          sunDir,
+          state.visibilityMode,
+          this.catalogData,
+          state.categoryFilters,
+          state.regimeFilters,
+          this.visualNoradIds
+        )
+      : this.satelliteRenderer.updatePositions(
+          result.positions,
+          result.validFlags,
+          result.objectCount,
+          observerPos,
+          sunDir,
+          state.visibilityMode,
+          this.catalogData,
+          state.categoryFilters,
+          state.regimeFilters,
+          this.visualNoradIds
+        );
+
+    useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+
+    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
+
+    if (state.showOrbitTrail && state.selectedIndex !== null) {
+      this.refreshOrbitTrail(state);
+    }
+
+    this.devValidation?.runChecks(result.positions, result.validFlags, result.objectCount);
+
+    if (!this.firstPositionReceived) {
+      this.firstPositionReceived = true;
+      useStore.getState().setLoadingPhase('ready');
     }
   }
 
@@ -806,7 +784,7 @@ export class Engine {
       this.orbitTrailRenderer.generate(
         sat.line1,
         sat.line2,
-        this.getCurrentPropagationTimestampMs(),
+        this.sgp4Client?.getCurrentPropagationTimestampMs() ?? simClock.now(),
       );
       return;
     }
@@ -817,70 +795,6 @@ export class Engine {
     }
 
     this.orbitTrailRenderer.clear();
-  }
-
-  private updateTleVelocityBuffers(velocities: Float32Array): void {
-    if (this.currTleVelocitiesTeme === null || this.prevTleVelocitiesTeme === null) {
-      this.currTleVelocitiesTeme = new Float32Array(velocities.length);
-      this.prevTleVelocitiesTeme = new Float32Array(velocities.length);
-      this.currTleVelocitiesTeme.set(velocities);
-      this.prevTleVelocitiesTeme.set(velocities);
-      return;
-    }
-
-    if (
-      this.currTleVelocitiesTeme.length !== velocities.length
-      || this.prevTleVelocitiesTeme.length !== velocities.length
-    ) {
-      this.currTleVelocitiesTeme = new Float32Array(velocities.length);
-      this.prevTleVelocitiesTeme = new Float32Array(velocities.length);
-      this.currTleVelocitiesTeme.set(velocities);
-      this.prevTleVelocitiesTeme.set(velocities);
-      return;
-    }
-
-    this.prevTleVelocitiesTeme.set(this.currTleVelocitiesTeme);
-    this.currTleVelocitiesTeme.set(velocities);
-  }
-
-  private getCurrentPropagationTimestampMs(): number {
-    if (this.lastPropagationTimestampMs <= 0 || this.lastTickTime <= 0) {
-      return simClock.now();
-    }
-
-    const wallElapsedMs = Math.min(
-      Math.max(performance.now() - this.lastTickTime, 0),
-      this.getPropagationIntervalMs(),
-    );
-    return this.lastPropagationTimestampMs + wallElapsedMs * simClock.getRate();
-  }
-
-  private getInterpolatedTleVelocity(index: number, t: number, out: THREE.Vector3): THREE.Vector3 {
-    if (
-      this.prevTleVelocitiesTeme === null
-      || this.currTleVelocitiesTeme === null
-      || index < 0
-    ) {
-      out.set(0, 0, 0);
-      return out;
-    }
-
-    const i3 = index * 3;
-    if (i3 + 2 >= this.currTleVelocitiesTeme.length || i3 + 2 >= this.prevTleVelocitiesTeme.length) {
-      out.set(0, 0, 0);
-      return out;
-    }
-
-    const vx = this.prevTleVelocitiesTeme[i3]
-      + (this.currTleVelocitiesTeme[i3] - this.prevTleVelocitiesTeme[i3]) * t;
-    const vy = this.prevTleVelocitiesTeme[i3 + 1]
-      + (this.currTleVelocitiesTeme[i3 + 1] - this.prevTleVelocitiesTeme[i3 + 1]) * t;
-    const vz = this.prevTleVelocitiesTeme[i3 + 2]
-      + (this.currTleVelocitiesTeme[i3 + 2] - this.prevTleVelocitiesTeme[i3 + 2]) * t;
-
-    // TEME -> Three.js axis swap (x, z, -y)
-    out.set(vx, vz, -vy);
-    return out;
   }
 
   private getDsoVelocity(dsoIndex: number, out: THREE.Vector3): THREE.Vector3 {
@@ -903,34 +817,11 @@ export class Engine {
     return out;
   }
 
-  /**
-   * Propagation interval in wall-clock ms, scaled by sim rate.
-   * At 1x: 1000ms. At 10x+: 200ms (5 Hz) so satellites stay
-   * synced with Earth rotation and sun direction.
-   */
-  private getPropagationIntervalMs(): number {
-    const rate = Math.abs(simClock.getRate());
-    if (rate <= 1) return 1000;
-    // At higher rates, propagate faster (min 200ms = 5Hz wall-clock)
-    return Math.max(200, Math.round(1000 / rate));
-  }
-
-  private reschedulePropagation(): void {
-    if (this.propagationInterval !== null) {
-      clearInterval(this.propagationInterval);
-    }
-    const intervalMs = this.getPropagationIntervalMs();
-    this.propagationInterval = setInterval(() => {
-      this.worker!.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: ++this.propagationSeq });
-    }, intervalMs);
-  }
-
   /** Called by store actions on rate change, jumpTo, or reset. */
   private onSimTimeJump(): void {
-    // Immediate TLE propagation at new sim-time; snap the response (no tween)
-    const jumpSeq = ++this.propagationSeq;
-    this.snapAtOrAfterSeq = jumpSeq;
-    this.worker?.postMessage({ type: 'PROPAGATE', timestamp: simClock.now(), seq: jumpSeq });
+    // SGP4: immediate snap + reschedule (all handled internally)
+    this.sgp4Client?.requestImmediateSnap();
+    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
     // Immediate DSO tick at new sim-time
     if (this.dsoWorker && !this.dsoWorkerTickInFlight) {
@@ -941,13 +832,6 @@ export class Engine {
       this.dsoWorkerTickInFlight = true;
       this.dsoWorkerLastTickSentAt = performance.now();
     }
-
-    // Reset interpolation state so we don't tween from old time
-    this.lastTickTime = 0;
-    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
-
-    // Reschedule propagation cadence for new rate
-    this.reschedulePropagation();
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());
@@ -968,13 +852,9 @@ export class Engine {
     this.earthRenderer.object.rotation.y = getGAST(now);
 
     // GPU-side interpolation factor for TLE positions
-    let uT = 0.0;
-    if (this.lastTickTime > 0) {
-      const elapsed = performance.now() - this.lastTickTime;
-      const intervalMs = this.getPropagationIntervalMs();
-      uT = Math.min(elapsed / intervalMs, 1.0);
-      this.satelliteRenderer.material.uniforms.uT.value = uT;
-    }
+    const tickState = this.sgp4Client?.getTickState();
+    const uT = tickState?.uT ?? 0.0;
+    this.satelliteRenderer.material.uniforms.uT.value = uT;
 
     this.devValidation?.tickFrame();
 
@@ -1041,7 +921,7 @@ export class Engine {
       let endCamPos: THREE.Vector3;
       let endTarget: THREE.Vector3;
       if (trackingStyle === 'joyride') {
-        this.getInterpolatedTleVelocity(selectedIdx, uT, this.trackingVelocity);
+        this.sgp4Client!.getInterpolatedVelocity(selectedIdx, uT, this.trackingVelocity);
         endCamPos = satPos;
         this.cameraController.getJoyrideEntryTarget(satPos, this.trackingVelocity, this.joyrideEntryTarget);
         endTarget = this.joyrideEntryTarget;
@@ -1095,7 +975,7 @@ export class Engine {
       // TLE follow
       const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
       if (trackingStyle === 'joyride') {
-        this.getInterpolatedTleVelocity(selectedIdx, uT, this.trackingVelocity);
+        this.sgp4Client!.getInterpolatedVelocity(selectedIdx, uT, this.trackingVelocity);
         this.cameraController.updateJoyride(satPos, this.trackingVelocity, this.controls.target);
       } else {
         this.cameraController.updateFollow(satPos, this.controls.target);
@@ -1529,9 +1409,7 @@ export class Engine {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }
-    if (this.propagationInterval !== null) {
-      clearInterval(this.propagationInterval);
-    }
+    this.sgp4Client?.dispose();
     if (this.visualRefreshInterval !== null) {
       clearInterval(this.visualRefreshInterval);
       this.visualRefreshInterval = null;
@@ -1541,14 +1419,10 @@ export class Engine {
     this.trailUnsub?.();
     this.dsoUnsub?.();
     this.dsoEphemerisUnsub?.();
-    this.worker?.terminate();
     this.dsoWorker?.terminate();
     this.joyrideLookPointerPos = null;
     this.dsoWorkerTickInFlight = false;
     this.dsoWorkerLastTickSentAt = 0;
-    this.lastPropagationTimestampMs = 0;
-    this.prevTleVelocitiesTeme = null;
-    this.currTleVelocitiesTeme = null;
     this.dsoVelocitiesTeme = null;
     this.dsoWorkerKnownIds.clear();
     this.dsoWorkerKnownSnapshotVersions.clear();
