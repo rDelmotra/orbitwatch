@@ -1,0 +1,98 @@
+===============================================================================
+ORBITWATCH — EARTH / TAKRAM RENDERING: REFERENCE INDEX  (start here)
+===============================================================================
+What this folder is:
+  A set of notes for re-building the cinematic Earth (streaming imagery tiles +
+  day/night relight + atmosphere + clouds) cleanly, from an earlier commit that
+  has none of this yet. It captures what worked, what didn't, the exact verified
+  facts (URLs, formats, numbers), and a sane module design.
+
+Who it's for:
+  Whoever (human or AI agent) re-codes this subsystem. Treat these as a GUIDE,
+  not a rulebook. Almost nothing here is mandatory — the few genuinely
+  load-bearing bits are labelled "load-bearing". Everything else is "this is what
+  worked for us, adapt freely".
+
+How to use it:
+  Skim this index, read 01 (architecture) and 02 (coordinates) once, then pull up
+  the specific file for whatever layer you're building. Each file stands alone.
+
+
+-------------------------------------------------------------------------------
+THE FILES
+-------------------------------------------------------------------------------
+  00_INDEX.txt                 - this file: goal, build order, invariants.
+  01_ARCHITECTURE_AND_MODULES  - the module system + code practices. How layers
+                                 plug in (init/update/dispose), the orchestrator,
+                                 the always-on failsafe surface, dispose discipline.
+  02_COORDINATES_AND_TIME      - ECI/ECEF/GAST/Sun, the scene unit (1 ER), the
+                                 axis swap, parenting rule. Read once, save hours.
+  03_TILES                     - streaming day imagery + night-lights tiles, the
+                                 day/night relight shader, the big gotchas.
+  04_DEPTH_ALIGNMENT           - what's in front of what; why the location cone
+                                 sinks and satellites vanish; correct distances so
+                                 thin clouds hug the globe; render layers.
+  05_POSTPROCESSING_PIPELINE   - EffectComposer, AA, the depth-blit saga, DepthPass,
+                                 GPU-picker coexistence. Only needed once you add a
+                                 depth-reading effect (the atmosphere).
+  06_TAKRAM_ATMOSPHERE         - Bruneton aerial-perspective (this works well). LUTs,
+                                 the world->ECEF scale bridge, the merge strategy.
+  07_TAKRAM_CLOUDS             - volumetric clouds: an honest dead-end from orbit,
+                                 plus the pragmatic 2D "live clouds" path that ships.
+  08_DATA_SOURCES              - every external feed in one place (ESRI, NASA GIBS,
+                                 JPL Horizons) with verified URLs/quirks + deps note.
+  09_DECISIONS_AND_PITFALLS    - what we cut and why, the gotcha index, process
+                                 lessons, and the don't-regress invariants.
+
+
+-------------------------------------------------------------------------------
+TARGET ARCHITECTURE (one screen)
+-------------------------------------------------------------------------------
+  Engine (plain class, one per canvas)         <- orchestrates, owns nothing fancy
+    |- Renderer / Camera / Controls / clock    <- plain WebGL infra
+    |- World = a registry of "layers"          <- the key idea (see 01)
+    |    each layer: init(ctx) / update(frame) / dispose()  [+ optional getEffects()]
+    |      - FallbackEarthSurface  (always on; a simple textured sphere = safety net)
+    |      - TileEarthSurface      (ESRI day imagery, streamed)
+    |      - NightLights / Clouds / Ice  (more tile layers / shells)
+    |      - Atmosphere            (contributes a post-process Effect)
+    |- RenderPipeline (EffectComposer)         <- only if a layer needs post-fx
+         collects each ready layer's getEffects() and runs them in order
+
+  Satellites / DSO / trails / starfield stay their own renderers in the scene root
+  (inertial frame). The Earth layers live under one Earth Group that spins by GAST.
+
+  Why a layer registry: new visuals REGISTER a layer; they don't edit the
+  orchestrator. Any layer can fail and the rest (and the fallback) keep working.
+
+
+-------------------------------------------------------------------------------
+RECOMMENDED BUILD ORDER (each step leaves the app working)
+-------------------------------------------------------------------------------
+  1. Coordinates first (02). Get GAST spin + ECI sun right with whatever Earth you
+     already have. Nothing below works if the frame is wrong.
+  2. Module skeleton + failsafe surface (01). A tiny layer interface and an
+     always-on textured sphere. Everything after is "add a layer".
+  3. Day tiles (03). Streaming ESRI imagery on the sphere. Handle the OPAQUE-tile
+     gotcha (or your satellites vanish). Hide the fallback surface once tiles load.
+  4. Day/night relight + night-lights tiles (03). Make the night side dark and add
+     Black Marble city lights, gated by the terminator.
+  5. Depth/occlusion pass (04). Confirm the location cone sits on top and satellites
+     occlude correctly. Fix distances so anything you add later hugs the surface.
+  6. Post-processing pipeline (05) — only now, because the atmosphere needs it.
+  7. Atmosphere (06). The big realism win, and it actually works.
+  8. Clouds (07). Use the 2D live path. Don't sink time into volumetric-from-orbit.
+  9. Data wiring + refresh (08). Live cloud/ice feeds, attribution, failsafes.
+ 10. Cleanup + lazy-load the heavy stack (01/09).
+
+
+-------------------------------------------------------------------------------
+HEADLINE INVARIANTS (the few "don't regress" ones — details in 09)
+-------------------------------------------------------------------------------
+  - Engine is a plain class, NOT a singleton (React StrictMode double-mounts in dev).
+  - One length unit: 1 world unit = 1 Earth radius; surface sits at radius 1.0.
+  - One sun source for surface + atmosphere (a second source = double terminator).
+  - High-res surface comes from TILES, not from a bigger texture (GPU clamps 16384).
+  - Every class that makes a GL object implements dispose().
+  - Any layer can fail without taking down the others or the fallback.
+===============================================================================

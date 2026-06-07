@@ -1,0 +1,183 @@
+===============================================================================
+01 — ARCHITECTURE & MODULES  (how to keep this maintainable)
+===============================================================================
+This is the part worth getting right, because the Earth grew feature by feature
+(tiles, night lights, relight, atmosphere, clouds, ice) and will keep growing.
+The goal: new visuals plug in as self-contained LAYERS instead of editing one big
+file. None of this is mandatory; it's the shape that kept things sane.
+
+
+-------------------------------------------------------------------------------
+1. THE LAYER CONTRACT (the one good abstraction)
+-------------------------------------------------------------------------------
+Every Earth visual implements the same tiny interface. In the current code it's
+`GeospatialModule` (geospatial/types.ts). Shape:
+
+  interface Layer {
+    readonly name: string;
+    readonly ready: boolean;       // finished init OK and contributing
+    readonly failed: boolean;      // init failed; skip it, keep the fallback
+    init(ctx): Promise<void>;      // build meshes/effects; may fetch
+    update(frame): void;           // per-frame; cheap; no allocations
+    dispose(): void;               // free every GL object you made
+    getEffects?(): Effect[];       // optional: post-process effects to run
+  }
+
+That's the whole idea. The orchestrator only knows this interface. A new feature
+(say "aurora") is a new file implementing it, plus one line to register it.
+
+CONTEXT passed to init() — everything a layer might need, nothing it shouldn't:
+  GeospatialContext = {
+    renderer, camera, scene,
+    earthGroup,              // the GAST-spun Group; parent ground-fixed meshes here
+    maxAnisotropy,
+    fallback,                // FallbackControls: hideSurface/hideClouds/hideAtmosphere
+    postProcessingAvailable, // is there a composer to render effects into?
+    atmosphereTextures,      // shared Bruneton LUTs (or null) — see 06
+  }
+
+FRAME state passed to update() — precomputed once per frame, shared by all layers:
+  FrameState = {
+    date, delta,
+    gastRadians,
+    sunDirectionECI, sunDirectionECEF,   // one sun, two frames (see 02)
+    moonDirectionECEF,                   // reserved
+    cameraPositionECEF,
+    camera,
+  }
+
+Keep update() allocation-free (reuse scratch vectors/matrices); it runs 60x/sec.
+
+
+-------------------------------------------------------------------------------
+2. THE ORCHESTRATOR (EarthGroupManager today; "World" tomorrow)
+-------------------------------------------------------------------------------
+One object owns:
+  - the Earth THREE.Group (Engine sets earthGroup.rotation.y = GAST each frame),
+  - the always-on FallbackEarthSurface,
+  - a CoordinateBridge (ECI->ECEF helpers for effects),
+  - the list of layers,
+  - shared resources loaded ONCE (e.g. the Bruneton LUTs, shared by atmosphere +
+    clouds) so two layers don't fetch the same megabytes twice.
+
+It does four things and no more:
+  initModules(): load shared resources, then init each layer (each wrapped in its
+                 own try/catch — one failing layer must not stop the others).
+  update(frame): build the FrameState once, then call each ready layer's update,
+                 EACH wrapped in try/catch (a throw here would otherwise abort the
+                 whole render loop before satellites/post draw — learned the hard
+                 way; permanently skip a layer that throws).
+  getPostProcessEffects(): collect getEffects() from ready, non-failed layers in
+                 registration order (order matters — see 05/06/07).
+  dispose(): dispose every layer + the fallback + the shared resources it owns.
+
+Load-bearing: the per-layer try/catch at BOTH init and update. It's what makes
+"any layer can fail without taking down the rest or the fallback" actually true.
+
+
+-------------------------------------------------------------------------------
+3. THE FAILSAFE SURFACE (why the Earth never disappears)
+-------------------------------------------------------------------------------
+FallbackEarthSurface is a plain textured sphere (+ optional simple cloud/atmos
+shells) that is ALWAYS in the scene from the start. Fancy layers, when they
+successfully take over, hide the matching fallback piece:
+  - tiles load        -> fallback.hideSurface()   (on the first tile, once)
+  - atmosphere ready  -> fallback.hideAtmosphere() (only if a pipeline exists)
+  - clouds ready      -> fallback.hideClouds()
+If a network/CORS/GPU problem kills a layer, its fallback piece simply stays
+visible. The user never sees a black void. This is cheap insurance; keep it.
+
+One efficiency note (see 09): the fallback currently loads big textures eagerly
+even when tiles immediately hide it. If you care about startup cost, make the
+fallback lazy (only load heavy maps if a layer actually fails) — but keep the
+safety net.
+
+
+-------------------------------------------------------------------------------
+4. CODE PRACTICES THAT PAID OFF (guidance, not law)
+-------------------------------------------------------------------------------
+- Engine is a PLAIN CLASS, not a singleton. App.tsx mounts it per canvas and
+  dispose()s on unmount. React StrictMode double-mounts effects in dev, so a
+  singleton hands back a disposed instance. (This one really did bite; treat it as
+  load-bearing.)
+- Prefer plain CALLBACKS over an event-emitter dependency. The codebase already
+  passes callbacks everywhere; a layer needing to tell the orchestrator something
+  takes a callback in its options. Fewer moving parts than an emitter bus.
+- Strict dispose() discipline. Every class that creates a geometry, material,
+  render target, or texture frees it. ShaderMaterial uniform textures and render
+  targets don't get GC'd — free them by hand. Leaks here are invisible until VRAM
+  runs out.
+- Don't add new store subscriptions inside the requestAnimationFrame loop. Read a
+  snapshot (store.getState()) in the loop; register subscriptions ONCE at setup.
+- The orchestrator coordinates; it does NOT grow new mesh/material/geometry code.
+  New scene objects live in a layer. If you're tempted to add a mesh to the
+  orchestrator, that's a sign it wants to be a layer.
+- Shared resources load once and are passed via the context (e.g. atmosphereTextures).
+  Layers consume them; the owner disposes them.
+
+Target direction (not built yet, but where this is heading):
+- Generalize the layer registry up to the engine level as a "World" so satellites,
+  starfield, trails, etc. are also just layers with init/update/dispose.
+- Pull the raw WebGL infra (renderer, camera, controls, clock, resize) out of the
+  orchestrator into small Renderer/Camera/Time/Sizes helpers.
+- Funnel the store's trigger* actions (flyTo, joyride, reset, time jump...) through
+  ONE command/query facade. Then a future in-canvas AI voicebot is "just another
+  caller" of the same surface the UI uses — no special-casing.
+
+
+-------------------------------------------------------------------------------
+5. A MINIMAL LAYER (copy this shape)
+-------------------------------------------------------------------------------
+  export class MyLayer implements Layer {
+    readonly name = 'my-layer';
+    private _ready = false; private _failed = false;
+    private _mesh: THREE.Mesh | null = null;
+    get ready()  { return this._ready; }
+    get failed() { return this._failed; }
+
+    async init(ctx) {
+      try {
+        this._mesh = /* build it */;
+        ctx.earthGroup.add(this._mesh);     // ground-fixed -> under the Earth group
+        // ctx.fallback.hideX();            // if you replace a fallback piece
+        this._ready = true;
+      } catch (e) { this._failed = true; console.warn('[my-layer] init failed', e); }
+    }
+
+    update(frame) { /* cheap, allocation-free; use frame.sunDirection*, gastRadians */ }
+
+    // getEffects() { return [myPostEffect]; }   // only if it's a post-process
+
+    dispose() {
+      this._mesh?.geometry.dispose();
+      (this._mesh?.material as THREE.Material)?.dispose();
+      this._mesh?.removeFromParent();
+      this._mesh = null;
+    }
+  }
+Register it in the orchestrator's layer list (mind the order if it returns effects).
+
+
+-------------------------------------------------------------------------------
+6. SUGGESTED FILE LAYOUT (for the re-code)
+-------------------------------------------------------------------------------
+  engine/
+    Engine.ts                  orchestrator (thin)
+    Renderer.ts, Camera.ts     (optional) extracted WebGL infra
+    RenderPipeline.ts          EffectComposer wrapper (see 05) — only if needed
+    world/
+      World.ts                 the layer registry
+      layers/
+        FallbackEarthSurface.ts
+        TileEarthSurface.ts    (consider a generic "tile layer" factory: day,
+                               night-lights, cloud/ice overlays are all the same
+                               thing with different url + blend + relight role)
+        AtmosphereLayer.ts
+        CloudsLayer.ts
+    geospatial/
+      types.ts                 the Layer/Context/Frame contracts
+      CoordinateBridge.ts      ECI<->ECEF helpers
+      constants.ts             EARTH_RADIUS_METERS, METERS_TO_ER, ...
+The names matter less than the boundaries: contracts in one place, each visual in
+its own file, the orchestrator staying thin.
+===============================================================================

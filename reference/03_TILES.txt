@@ -1,0 +1,371 @@
+===============================================================================
+ORBITWATCH — STREAMING TILE EARTH (notes, learnings, references)
+Scope: TILES ONLY. No Takram atmosphere/clouds here on purpose.
+Goal of this file: a friendly guide for adding a streaming, high-res, day/night
+Earth surface (ESRI day imagery + NASA Black Marble night lights) on top of an
+EARLIER commit that has no Takram work in it yet.
+Tone: this is a guide, not a rulebook. Pick what fits. "Worth doing" /
+"optional" / "gotcha" labels are hints, not orders. Only a few things are truly
+load-bearing and they're marked "load-bearing".
+===============================================================================
+
+
+-------------------------------------------------------------------------------
+0. THE ONE-PARAGRAPH SUMMARY
+-------------------------------------------------------------------------------
+A single huge Earth texture (8k/16k/"32k") is a dead end: GPUs clamp textures at
+16384, a 32k map is ~1 GB+ VRAM, and it still looks soft up close. The thing that
+actually scales is STREAMING TILES: drape map tiles (XYZ) on a sphere and let a
+tile engine load only what's on screen at the zoom the camera needs. We used
+`3d-tiles-renderer` with ESRI World Imagery for the daytime surface and NASA GIBS
+"Black Marble" for night-time city lights, then added a small custom day/night
+shader so the night side actually goes dark. Everything below is the detail.
+
+
+-------------------------------------------------------------------------------
+1. LIBRARY + INSTALL
+-------------------------------------------------------------------------------
+Package: 3d-tiles-renderer  (we used ^0.4.27)
+GitHub:  https://github.com/NASA-AMMOS/3DTilesRendererJS
+Install: npm install -w <your-frontend-workspace> 3d-tiles-renderer@^0.4.27
+
+Imports we used:
+  import { TilesRenderer } from '3d-tiles-renderer';
+  import { XYZTilesPlugin } from '3d-tiles-renderer/plugins';
+  // (TilesFadePlugin also exists in /plugins — we ended up NOT using it, see §6)
+
+Peer deps: 3d-tiles-renderer peers on `three` only, and works fine with three
+r173. NOTE: the `.npmrc` with `legacy-peer-deps=true` in this repo exists for the
+TAKRAM packages (they peer on React 19). Tiles alone probably don't need it — if
+you're on a pre-Takram commit and npm complains, that's likely something else.
+
+Bundle weight: ~+145 KB minified for the tile engine. Fine, but a candidate for
+lazy `import()` later if you care about first paint.
+
+
+-------------------------------------------------------------------------------
+2. DATA SOURCES (verified working, with the exact quirks)
+-------------------------------------------------------------------------------
+DAY — ESRI World Imagery (free, no key, sub-meter in many places):
+  https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+  - Returns image/jpeg. CORS is open. Zoom goes very deep (~19+).
+  - URL order is {z}/{y}/{x}  =  level / ROW / COL  (note: row before col).
+  - Attribution belongs to Esri/Maxar/etc. — fine for dev; check terms for prod.
+
+NIGHT — NASA GIBS VIIRS Black Marble (city lights):
+  https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png
+  - Gotcha: it's PNG, not JPG. Requesting .jpg returns HTTP 400
+    ("FORMAT is invalid for LAYER"). Use .png.
+  - Gotcha: zoom only goes to 8. z9 returns HTTP 400. Cap it (see `levels` in §3).
+  - It's ~500 m/pixel native (VIIRS sensor limit) and a STATIC 2016 yearly
+    composite. So it will always look softer than the day imagery. That's the
+    data, not a bug — there is no higher-res free global night-lights layer.
+  - CORS: GIBS sends Access-Control-Allow-Origin: * (works from localhost).
+  - {z}/{y}/{x} order again = TileMatrix / TileRow / TileCol.
+
+Visual reference to sanity-check positions/dates: https://worldview.earthdata.nasa.gov
+GIBS API docs: https://nasa-gibs.github.io/gibs-api-docs/
+GIBS WMTS capabilities (lists every layer + its tile matrix set / max zoom):
+  https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml
+
+
+-------------------------------------------------------------------------------
+3. XYZTilesPlugin OPTIONS
+-------------------------------------------------------------------------------
+  new XYZTilesPlugin({
+    shape: 'ellipsoid',   // drape on a globe (vs 'planar'); load-bearing for a globe
+    url: '<tile url with {z}/{y}/{x}>',
+    levels: 9,            // optional zoom cap = number of levels (9 => max zoom 8).
+                          //   Use this for Black Marble so it doesn't 400 on z9.
+    tileDimension: 256,   // optional, default 256
+  })
+
+  - `useRecommendedSettings: true` is NOT a real option for XYZTilesPlugin
+    (it belongs to the auth / quantized-mesh plugins). Passing it is harmless but
+    does nothing. We left it on the ESRI layer by accident; you can drop it.
+
+
+-------------------------------------------------------------------------------
+4. PUTTING TILES IN THE SCENE (coordinates + scale)
+-------------------------------------------------------------------------------
+Context: our scene is ECI, Y-up, and 1 world unit = 1 Earth radius
+(EARTH_RADIUS_METERS = 6_371_000, so METERS_TO_ER = 1 / 6_371_000).
+The tileset comes in WGS84 ECEF metres, Z-up. So:
+
+  const tiles = new TilesRenderer();
+  // ... (see §5 for the ellipsoid radius tweak — do it here)
+  tiles.registerPlugin(new XYZTilesPlugin({ shape: 'ellipsoid', url }));
+
+  tiles.setCamera(camera);
+  tiles.setResolutionFromRenderer(camera, renderer);
+
+  const g = tiles.group;
+  g.scale.setScalar(METERS_TO_ER);     // metres -> Earth radii
+  g.rotation.set(-Math.PI / 2, LON_OFFSET_RAD, 0);  // ECEF Z-up -> scene Y-up
+  earthGroup.add(g);                   // parent to your Earth group, NOT the scene
+
+Per frame:
+  tiles.setResolutionFromRenderer(camera, renderer);  // cheap; also handles resize
+  tiles.update();                                      // LOD + streaming
+
+Dispose:
+  tiles.removeEventListener('load-model', onLoad);
+  tiles.group.removeFromParent();
+  tiles.dispose();
+
+Why parent to the Earth group (the thing you rotate by GAST each frame):
+  - The tiles then co-rotate with the planet and stay locked under the satellites.
+  - 3d-tiles-renderer accounts for the group's world transform when it computes
+    screen-space error, so LOD still works correctly through the scale.
+
+LON_OFFSET_RAD: a calibration knob (we left it 0). ESRI and GIBS are both
+web-mercator XYZ, so they line up with each other automatically regardless of it.
+It only matters if the imagery's prime meridian looks rotated relative to your
+satellite/ECEF frame — rotate until coastlines sit under known objects.
+
+
+-------------------------------------------------------------------------------
+5. GOTCHA: THE GLOBE IS SLIGHTLY TOO BIG (surface markers sink)
+-------------------------------------------------------------------------------
+Symptom we hit: a ground marker (observer cone) appeared to sink "2D" beneath the
+surface. Cause: tiles default to the WGS84 ELLIPSOID (equatorial 6_378_137 m,
+polar 6_356_752 m). After scaling by 1/6_371_000 the equator sits at ~1.0011 ER —
+about 7 km ABOVE our 1-ER scene sphere — so it pokes through and swallows things
+sitting at exactly 1 ER.
+
+Fix that worked: pin the tile ellipsoid to a perfect sphere of our radius, right
+after constructing the TilesRenderer (before it processes tiles):
+
+  tiles.ellipsoid.radius.set(EARTH_RADIUS_METERS, EARTH_RADIUS_METERS, EARTH_RADIUS_METERS);
+
+(`tiles.ellipsoid` is a clone of WGS84_ELLIPSOID; `.radius` is a Vector3.)
+This makes the draped imagery spherical. There's a tiny positional error vs true
+WGS84, but for a spherical scene it's negligible and the surface now coincides
+exactly with 1 ER. Optional if your scene already uses a true ellipsoid.
+
+
+-------------------------------------------------------------------------------
+6. GOTCHA (load-bearing): TRANSPARENT TILES EAT YOUR SATELLITES
+-------------------------------------------------------------------------------
+This one is the big one and easy to miss.
+
+The image plugin builds each tile as:
+  new MeshBasicMaterial({ map: texture, transparent: true })
+
+`transparent: true` puts every tile in the TRANSPARENT render queue. If your
+satellites are transparent points (THREE.Points with depthWrite:false — the usual
+setup), they share that queue. Transparent objects sort back-to-front PER OBJECT,
+and the whole satellite cloud is one object that sorts at ~Earth's centre. So
+near-side tiles (closer than the centre) draw AFTER the satellites and — since the
+points wrote no depth — paint imagery right over them. Result: the satellites in
+front of the globe vanish and only the ones past the limb survive. Very confusing.
+
+Fix that worked: force the tile materials OPAQUE when they load, so they render in
+the opaque pass (before transparent overlays) and write real depth. Then ordinary
+depth testing does the right thing: near-side satellites in front, far-side hidden
+behind the globe.
+
+  const onLoad = (e /* { scene, tile, url } */) => {
+    e.scene.traverse((obj) => {
+      const mesh = obj;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        mat.transparent = false;
+        mat.depthWrite  = true;
+        mat.depthTest   = true;
+        mat.needsUpdate = true;
+      }
+    });
+    // also a good spot to hide your fallback sphere once (see §9)
+  };
+  tiles.addEventListener('load-model', onLoad);
+
+Related: we deliberately did NOT use TilesFadePlugin. It animates each tile's
+opacity (nice fade-in), but that REQUIRES transparent materials, which re-breaks
+the fix above. It's purely cosmetic, so dropping it was an easy call. If you want
+fade-in later, you'd need a fade that doesn't rely on the transparent queue.
+
+NICE TO KNOW: with opaque tiles writing depth, your satellites can keep their
+normal depthWrite:false — you do NOT need to change the satellites for tiles to
+occlude correctly. (We later set satellites depthWrite:true, but that was ONLY for
+the Takram atmosphere's screen-space sky pass, which is out of scope here.)
+
+The `load-model` event payload is { scene: Object3D, tile, url }.
+
+
+-------------------------------------------------------------------------------
+7. DAY / NIGHT SHADING (tiles are unlit = bright everywhere)
+-------------------------------------------------------------------------------
+ESRI imagery is full daylight with no terminator (MeshBasicMaterial is unlit). To
+get a dark night side, inject a sun term into each tile material via
+`onBeforeCompile`. Earth's centre is the scene origin, so the world radial of a
+fragment IS its surface normal — no geometry normals needed.
+
+Key idea: use the WORLD-space (ECI) sun direction — the same vector you light the
+satellites with — so the terminator is physically correct and sweeps as the Earth
+group rotates by GAST. Share ONE sun uniform object across all tile materials
+(mutate its .value once per frame) by assigning the same uniform reference inside
+onBeforeCompile, and keep onBeforeCompile as a stable function reference so all
+tile programs share one cache key.
+
+Vertex (add a varying, compute world position):
+  // after '#include <common>':   varying vec3 vTileWorldPos;
+  // after '#include <project_vertex>':
+  //   vTileWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+
+Fragment (after '#include <map_fragment>'):
+  vec3  R   = normalize(vTileWorldPos);
+  float ndl = dot(R, normalize(uSunDirection));
+  float day = smoothstep(-uTerminatorSoftness, uTerminatorSoftness, ndl);
+  diffuseColor.rgb *= mix(uNightLevel, uDayExposure, day);
+
+Uniforms we declared in the fragment <common> block:
+  uniform vec3  uSunDirection;        // world/ECI sun, updated each frame
+  uniform float uDayExposure;         // ~0.55 — tone down the bright ESRI day
+  uniform float uNightLevel;          // ~0.045 — dark night (not pure black)
+  uniform float uTerminatorSoftness;  // ~0.12 — dawn/dusk band, ~±7 degrees
+
+Per frame: sunUniform.value.copy(worldSunDir)   // one write feeds every tile
+
+Colour management note: the tile plugin DOES tag textures as sRGB
+(TiledImageSource sets texture.colorSpace = SRGBColorSpace). So there's no
+"everything is too bright because sRGB was read as linear" trap. On a vanilla
+renderer just keep renderer.outputColorSpace = SRGBColorSpace and (optionally)
+renderer.toneMapping = ACESFilmicToneMapping, and the multiply above behaves.
+
+Tuning hints (all just taste): lower uDayExposure if the day glares; raise
+uNightLevel if the night is too black; widen uTerminatorSoftness for a softer
+sunrise/sunset line.
+
+
+-------------------------------------------------------------------------------
+8. NIGHT CITY LIGHTS AS A SECOND TILE LAYER (Black Marble)
+-------------------------------------------------------------------------------
+Approach that worked: a SECOND TilesRenderer for Black Marble, drawn ADDITIVELY
+and gated to the night side using the same terminator term.
+
+Setup mirrors the day layer, with these differences:
+  - tiles.ellipsoid.radius.set(R, R, R)   // same sphere pin
+  - XYZTilesPlugin({ shape:'ellipsoid', levels: 9, url: BLACK_MARBLE_PNG })
+  - Lift the shell a hair so it never z-fights the day surface:
+        g.scale.setScalar(METERS_TO_ER * 1.0005);   // ~+3 km
+  - On load, set the material:
+        mat.transparent = true;
+        mat.depthWrite  = false;     // don't occlude; day surface owns depth
+        mat.depthTest   = true;      // still hidden behind Earth on the far side
+        mat.blending    = THREE.AdditiveBlending;
+        mat.onBeforeCompile = nightRelight;
+
+nightRelight fragment (after '#include <map_fragment>'):
+  vec3  R     = normalize(vTileWorldPos);
+  float ndl   = dot(R, normalize(uSunDirection));
+  float day   = smoothstep(-uTerminatorSoftness, uTerminatorSoftness, ndl);
+  float night = 1.0 - day;
+  diffuseColor.rgb *= uNightIntensity;   // ~2.0
+  diffuseColor.a    = night;             // AdditiveBlending: contribution = rgb * a
+                                         //   => lights only on the night side; the
+                                         //   black background adds nothing anyway.
+
+Why intensity ~2.0 and not higher: Black Marble is ~500 m/px and soft. Real city
+lights from orbit are diffuse glows, so a modest gain reads as natural bloom
+instead of a blurry texture. Crank it if you like it brighter.
+
+Two TilesRenderers = two tile streams. Black Marble is light (max zoom 8), so it's
+cheap. Run update() on both each frame; dispose both.
+
+
+-------------------------------------------------------------------------------
+9. FAILSAFE PATTERN (so a network/CORS hiccup never blanks the Earth)
+-------------------------------------------------------------------------------
+- Keep a simple textured fallback sphere in the scene from the start.
+- Wrap tile init in try/catch; on failure, leave the fallback visible.
+- Hide the fallback surface ONCE, on the first `load-model` event, when real
+  imagery starts covering it (guard with a boolean so it only fires once). They
+  share a radius, so showing both would z-fight.
+- The night layer is best-effort: give it its own try/catch so a GIBS outage
+  never takes down the day surface.
+
+
+-------------------------------------------------------------------------------
+10. RESOLUTION REALITY (set expectations)
+-------------------------------------------------------------------------------
+- Day (ESRI): streams to ~zoom 19, effectively sub-meter near the camera.
+- Night (Black Marble): zoom 8 max, ~500 m/px, and it's a 2016 composite.
+- So the night side will always be visibly softer than the day side, and it won't
+  match "today". There is no free global night-lights layer at day resolution.
+  Lowering night intensity hides the softness better than chasing sharpness.
+
+
+-------------------------------------------------------------------------------
+11. WHAT'S TILE-INTRINSIC vs WHAT WAS ACTUALLY ABOUT TAKRAM
+     (so you don't drag in changes you don't need on a pre-Takram commit)
+-------------------------------------------------------------------------------
+PART OF TILES (keep):
+  - Forcing tile materials opaque (§6) — needed for correct satellite occlusion.
+  - Pinning the ellipsoid radius (§5).
+  - The day/night onBeforeCompile shader (§7) and the night layer (§8).
+  - The fallback + failsafe (§9).
+
+NOT about tiles — these were only needed because of the Takram atmosphere, skip
+them for a tiles-only build:
+  - Setting satellites/DSO to depthWrite:true. (That fixed a screen-space sky pass
+    overwriting depth-less points. With just tiles, opaque tiles already occlude
+    satellites correctly and the satellites can stay depthWrite:false.)
+  - renderer antialias:false + an SMAA post pass. (That worked around a depth-blit
+    error from the atmosphere's depth read. Tiles render as ordinary scene objects;
+    a normal antialias:true renderer is fine.)
+  - The EffectComposer / RenderPipeline. (Tiles need none of it — they're just
+    meshes; render with your normal renderer.render(scene, camera).)
+
+
+-------------------------------------------------------------------------------
+12. DEPRECATION + WARNINGS YOU'LL SEE (harmless)
+-------------------------------------------------------------------------------
+- "Bo has been deprecated. Use GeneratedSurfacePlugin & ImageOverlayPlugin"
+  -> XYZTilesPlugin (it extends the deprecated ImageFormatPlugin). It still works.
+     The newer pattern splits surface geometry (GeneratedSurfacePlugin) from
+     imagery overlays (ImageOverlayPlugin). Worth knowing, not urgent.
+     One catch if you migrate: ImageOverlayPlugin composites overlays into ONE
+     texture per tile by opacity — that makes the per-fragment, terminator-gated
+     night-lights blend in §8 harder (you don't get separate samplers as easily).
+     That's why we stayed on the two-TilesRenderer approach.
+- "TilesRenderer: tiles versions at 1.1 or higher have limited support" — just an
+  informational note about the generated tileset version. Ignore.
+
+
+-------------------------------------------------------------------------------
+13. OPTIONAL / FUTURE IDEAS (not needed for a solid tile globe)
+-------------------------------------------------------------------------------
+- Live snow / sea ice tint: GIBS has snow-cover and sea-ice-concentration layers
+  (coarse, ~12-25 km). You can fetch a global equirect mask (e.g. via GIBS WMS
+  GetMap, EPSG:4326, BBOX=-90,-180,90,180) and, in the DAY relight shader, sample
+  it by GEOGRAPHIC lat/lon and mix the surface toward white. Geographic lon needs
+  GAST removed: lat = asin(worldRadial.y); lon_geo = lon_world - GAST. (We planned
+  this but didn't build it.)
+- Terrain relief: tiles here are flat colour (height 0). For sun-responsive
+  mountain shadows without geometry, sample a terrain-RGB source (e.g. free AWS
+  Terrarium tiles) into a normal and feed it to the day shader. For true displaced
+  terrain, QuantizedMeshPlugin (Cesium ion token or a quantized-mesh server) gives
+  geometry + normals — but from orbit relief is sub-pixel, so it's low value unless
+  you fly very low (and then you'd want a logarithmic depth buffer).
+- Google Photorealistic 3D Tiles: needs an API key, and the street-level detail is
+  invisible from orbit — not worth it for this view.
+- Lazy-load the tile engine via dynamic import() to keep it off first paint.
+
+
+-------------------------------------------------------------------------------
+14. QUICK REFERENCE — CONSTANTS WE USED
+-------------------------------------------------------------------------------
+  EARTH_RADIUS_METERS      = 6_371_000
+  METERS_TO_ER             = 1 / EARTH_RADIUS_METERS
+  LON_OFFSET_RAD           = 0          // imagery prime-meridian calibration
+  TILE_DAY_EXPOSURE        = 0.55       // day-side brightness multiply
+  TILE_NIGHT_LEVEL         = 0.045      // night-side ground brightness
+  TILE_TERMINATOR_SOFTNESS = 0.12       // dawn/dusk blend half-width (dot units)
+  NIGHT_RADIUS_LIFT        = 1.0005     // ~+3 km lift for the night-lights shell
+  TILE_NIGHT_LIGHTS_INTENSITY = 2.0     // city-lights gain
+
+  ESRI day:    https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+  Black Marble: https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png
+===============================================================================

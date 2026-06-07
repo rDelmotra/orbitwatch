@@ -1,0 +1,306 @@
+===============================================================================
+ORBITWATCH — DEPTH, OCCLUSION & CROSS-LAYER DISTANCE CORRECTNESS
+What this covers: why the location cone hides under the surface, why satellites
+sometimes vanish, and how to keep surface / clouds / atmosphere / satellites at
+physically correct distances so a thin cloud deck actually hugs the globe.
+Tone: a guide, not a rulebook. Numbers and fixes are what worked for us; adapt
+freely. Only a couple of things are genuinely load-bearing and are marked so.
+===============================================================================
+
+
+-------------------------------------------------------------------------------
+0. THE MENTAL MODEL (one length unit for everything)
+-------------------------------------------------------------------------------
+Pick ONE length unit and use it everywhere. We use:
+
+    1 world unit = 1 Earth radius (ER) = 6,371,000 m = 6371 km
+
+So every object's distance from the scene origin is just "radius in ER":
+
+    radius_ER = 1 + altitude_km / 6371
+
+The reason this matters for realism: clouds and the visible atmosphere are razor
+thin compared to the planet. 1 km is only 0.000157 ER. If any layer is drawn with
+a slightly different length unit, a 2 km-high cloud deck ends up floating tens of
+km off the surface and instantly looks fake. Distance correctness here is mostly
+"is everyone using the same unit, and is the surface at exactly radius 1.0?".
+
+
+-------------------------------------------------------------------------------
+1. CORRECT DISTANCES / ALTITUDES (reference table)
+-------------------------------------------------------------------------------
+Altitudes above the surface, and the same thing as a scene radius (ER):
+
+  Layer / object              altitude          radius (ER)
+  --------------------------  ----------------  -----------
+  Surface (tiles / ground)    0 km              1.00000
+  Low cloud base (cumulus)    ~1-2 km           1.00016 - 1.00031
+  Mid clouds                  ~2-6 km           1.00031 - 1.00094
+  High clouds (cirrus)        ~6-12 km          1.00094 - 1.00188
+  Tall storm tops             ~15-18 km         ~1.00255
+  Most airglow / haze visible ~50-100 km        1.0078 - 1.0157
+  Karman line ("space")       100 km            1.01570
+  ISS                         ~408 km           1.06405
+  Hubble                      ~535 km           1.08398
+  Starlink shell              ~550 km           1.08634
+  LEO band (typical)          160 - 2000 km     1.0251 - 1.3140
+  MEO / GPS                   ~20,200 km        ~4.17
+  GEO                         35,786 km         6.6168
+  Moon                        ~384,400 km       ~60.3
+
+Takeaways:
+  - Clouds live in the first ~0.003 ER. They MUST sit just barely above the
+    surface or they look detached. This is the strictest tolerance in the scene.
+  - The whole visible atmosphere is < 0.02 ER thick. Also thin.
+  - Satellites are comfortably separated (ISS at 1.064 ER), so getting THEM a
+    little wrong is far less noticeable than getting clouds wrong.
+
+
+-------------------------------------------------------------------------------
+2. KEEPING CLOUDS / ATMOSPHERE / SURFACE CONSISTENT (the scale bridge)
+-------------------------------------------------------------------------------
+If you use a physically-based atmosphere/clouds system (e.g. one that works in
+real ECEF metres), you bridge "scene ER" <-> "real metres" with ONE matrix, and
+you reuse the SAME matrix for every layer in that system:
+
+    worldToECEF = Scale(s) * RotY(-GAST)
+
+where s is the metres-per-scene-unit you map onto. The trick that keeps a thin
+cloud deck hugging the surface:
+
+  - Map scene radius 1.0 exactly onto the system's "ground radius" (s = ground
+    radius in metres). Then the surface (scene 1.0) and the atmosphere/cloud base
+    coincide with zero gap.
+  - Feed clouds + atmosphere the SAME worldToECEF and the SAME sun. Because a
+    cloud layer's altitude is given in metres, and scene radius r maps to ECEF
+    radius r*s, a cloud at "h metres altitude" lands at scene radius 1 + h/s, i.e.
+    exactly h metres above the surface. Surface, clouds, atmosphere all stay
+    locked because they share s.
+
+Note on the ~0.17% radius difference: a common Bruneton-style atmosphere uses a
+ground radius of ~6,360,000 m, while our Earth is 6,371,000 m (an 11 km / 0.17%
+difference). Mapping scene 1.0 -> 6,360,000 keeps the surface and atmosphere base
+perfectly aligned; the only effect is that the atmosphere "thinks" the Earth is
+11 km smaller, which is invisible for scattering and for cloud altitude. So it's
+fine — just don't mix two different ground radii across layers.
+
+Load-bearing idea: the surface sphere should sit at EXACTLY radius 1.0. If the
+surface is off (see §3 ellipsoid note), clouds and atmosphere base no longer meet
+it and you get a visible seam or floating clouds.
+
+
+-------------------------------------------------------------------------------
+3. HOW THREE.JS DECIDES WHAT'S IN FRONT (so the bugs make sense)
+-------------------------------------------------------------------------------
+Two render queues, in this order:
+  1) OPAQUE objects: drawn front-to-back, each writes depth, depth-tested. Solid
+     and predictable.
+  2) TRANSPARENT objects (material.transparent === true): drawn AFTER opaque,
+     sorted BACK-TO-FRONT by each object's distance, and by default they still
+     depth-test but may or may not write depth.
+
+Per-object knobs that control all of this:
+  - material.depthTest   : is this pixel allowed to draw if something's in front?
+  - material.depthWrite  : does this pixel record its depth for later objects?
+  - material.transparent : which queue + alpha blending
+  - object.renderOrder   : manual tiebreaker within a queue (higher = later)
+  - material.polygonOffset (+ factor/units) : nudge depth to beat z-fighting
+
+The classic trap: TRANSPARENT objects sort by their OBJECT's bounding-sphere
+centre, not per pixel. A big point cloud (all satellites in one THREE.Points)
+sorts as a single thing at ~its centre. That single sort position is what causes
+"sometimes in front, sometimes behind" surprises (see §5).
+
+Depth precision: a perspective depth buffer is very non-linear. With near = 0.01
+and far = 1000 (our setup — near 64 km, far past the Moon) you still get plenty of
+precision near the Earth (~2-4 units away), so a satellite 0.06 ER above the
+surface separates cleanly. Precision gets coarse far out, which only matters for
+very distant things. If you ever DO see z-fighting between two near-coincident
+shells, options are: push them apart slightly, use polygonOffset, or (heavier) a
+logarithmic depth buffer (see §7).
+
+
+-------------------------------------------------------------------------------
+4. PROBLEM: THE LOCATION CONE ISN'T ON TOP (it sinks into the surface)
+-------------------------------------------------------------------------------
+The observer marker is a small cone parented to the Earth group, sitting at the
+observer's position on the surface (radius ~1.0), pointing outward. Two things
+make it disappear under the surface:
+
+(a) The surface is slightly too big. If the surface comes from tiles draped on the
+    WGS84 ellipsoid (equatorial 6,378,137 m), after scaling it sits ~7 km ABOVE
+    radius 1.0 at the equator and pokes through the cone's base.
+    Fix: pin the surface to a sphere at exactly 6,371,000 m so it's at radius 1.0.
+    (For tiles: tiles.ellipsoid.radius.set(R,R,R) before it streams.)
+
+(b) Depth fighting at the base. The cone base is at the same radius as the surface
+    so it z-fights / loses the depth test right where they touch.
+    Fix that worked for us — make the marker draw on top without occluding things
+    behind it:
+        material.depthWrite = false;   // don't stamp depth
+        material.depthTest  = true;    // still hidden when truly behind the globe
+        material.transparent = true;
+        material.blending = THREE.AdditiveBlending;  // glows over the surface
+        mesh.renderOrder = 1;          // draw after the surface
+    And let the cone extend OUTWARD from the surface (base at 1.0, tip a bit
+    higher), so its body is unambiguously in front on the near side.
+
+With both (a) and (b), the cone reads as a glow sitting on the ground, and it's
+still correctly hidden when it's on the far side of the Earth.
+
+
+-------------------------------------------------------------------------------
+5. PROBLEM: SATELLITES SOMETIMES DISAPPEAR (two different causes)
+-------------------------------------------------------------------------------
+Satellites are usually one THREE.Points object, transparent, with soft round
+sprites. They've vanished on us for TWO unrelated reasons — worth telling apart.
+
+CAUSE A — a transparent surface paints over them (sorting).
+  If your Earth surface is TRANSPARENT (tile materials default to transparent),
+  it joins the transparent queue with the satellites. The single satellite Points
+  object sorts at ~Earth's centre, so near-side surface pieces (closer than the
+  centre) draw AFTER the satellites and, since the points wrote no depth, cover
+  them. Symptom: satellites over the disk vanish, only the limb ones survive, and
+  they "come out of the edge" as you rotate.
+  Fix (load-bearing if your surface is transparent): make the surface OPAQUE so it
+  renders in the opaque queue first and writes depth. Then the points depth-test
+  normally: near-side visible, far-side hidden. With an opaque surface the points
+  can keep depthWrite:false and everything just works.
+
+CAUSE B — a screen-space effect overwrites them (depth-less pixels treated as sky).
+  A depth-reading post-process (e.g. an atmosphere "sky" pass) repaints every
+  pixel that has NO geometry depth. Soft points drawn with depthWrite:false leave
+  no depth, so against space they look like background and get painted over.
+  Symptom: satellites are fine over the bright Earth but vanish against black sky.
+  Fixes (pick one):
+    - Simple: give the points depthWrite:true so they register as geometry and the
+      sky pass leaves them alone. (Tiny side effects on overlapping sprites, but
+      usually fine.)
+    - Robust: render the satellites in a SEPARATE pass AFTER the effect, on top,
+      using render layers (see §6). This also lets the overlay ignore the effect's
+      haze entirely if you want crisp dots.
+
+Quick way to tell which one you have: if satellites vanish over the GLOBE -> A.
+If they vanish against SPACE -> B.
+
+
+-------------------------------------------------------------------------------
+6. RENDER LAYERS & THE TWO-PASS OVERLAY (when depth tricks aren't enough)
+-------------------------------------------------------------------------------
+three.js has a built-in layer system (a 32-bit mask on every object and camera):
+
+  https://threejs.org/docs/#api/en/core/Layers
+  https://threejs.org/docs/#api/en/core/Object3D.layers
+  https://threejs.org/docs/#api/en/cameras/Camera.layers
+
+Idea for an overlay (e.g. satellites that must sit on top of an atmosphere effect
+but still be hidden behind the solid Earth):
+  - Put overlay objects on their own layer:        satellites.layers.set(1);
+  - Render the world (Earth, atmosphere) with the camera seeing everything except
+    layer 1, through your normal pipeline.
+  - Then render ONLY layer 1 on top, reusing the SAME depth buffer so the globe
+    still occludes the far-side satellites:
+        camera.layers.set(1);
+        renderer.autoClear = false;            // keep colour + depth
+        renderer.render(scene, camera);
+        camera.layers.enableAll();             // restore
+  - The shared depth buffer is the key: it's what keeps far-side dots hidden while
+    near-side dots draw over the finished atmosphere.
+
+With a post-processing EffectComposer this is fiddlier because the composer owns
+its own buffers — you either render the overlay into the composer's output target
+while its depth is still attached, or keep a depth texture around to test against.
+References:
+  - three.js manual, "Rendering on top / multiple passes" patterns
+    (search: three.js render order, autoClear, scene over scene)
+  - pmndrs postprocessing passes (RenderPass, DepthPass) if you're on a composer:
+    https://github.com/pmndrs/postprocessing
+  - General write-up on layered/overlay rendering and depth sharing:
+    https://discourse.threejs.org/  (search "render on top keep depth")
+
+Rule of thumb: reach for the simple depth-knob fixes in §4/§5 first; only bring in
+layers + a second pass when a screen-space effect is fighting you (Cause B) and
+you want the overlay truly independent of it.
+
+
+-------------------------------------------------------------------------------
+7. CAMERA NEAR/FAR & DEPTH PRECISION
+-------------------------------------------------------------------------------
+We use PerspectiveCamera(fov, aspect, 0.01, 1000):
+  - near 0.01 ER = ~64 km  (lets you get close to the surface / fly the ISS)
+  - far  1000 ER = ~6.37 million km (covers GEO at 6.6 ER and the Moon at ~60 ER)
+
+That's a 100,000:1 range, which sounds scary but is fine in practice because the
+interesting stuff (surface, clouds, LEO) is only a few units from the camera,
+where precision is dense. Things to keep in mind:
+  - Don't push near smaller than you need; tiny near plane is what wastes far
+    precision. 0.01 is already quite small.
+  - If two thin shells z-fight (e.g. a cloud shell exactly on the surface), nudge
+    one a few km apart or use polygonOffset rather than shrinking near/far.
+  - Logarithmic depth buffer (new WebGLRenderer({ logarithmicDepthBuffer: true }))
+    spreads precision more evenly and helps huge scenes, BUT every CUSTOM shader
+    has to opt in (include the three.js logdepthbuf chunks) or it'll mismatch the
+    standard materials. With 8+ custom shaders that's real work, so we did NOT use
+    it — the default buffer is fine for this scene. Background reading:
+      https://threejs.org/examples/#webgl_camera_logarithmicdepthbuffer
+      "Logarithmic Depth Buffer" (Outerra / Brano Kemen) — search engine it.
+
+
+-------------------------------------------------------------------------------
+8. ALIGNMENT (things line up in the right PLACE, not just the right depth)
+-------------------------------------------------------------------------------
+- One rotation source of truth: rotate the Earth group by GAST
+  (earthGroup.rotation.y = GAST). Parent the surface tiles, clouds shells, the
+  observer marker, and anything "fixed to the ground" to that group so they all
+  turn together and stay under the satellites (which live in the inertial scene
+  frame and don't rotate).
+- Surface-fixed textures (night lights, snow/ice) need GEOGRAPHIC coordinates, so
+  remove GAST when sampling them: lat = asin(worldRadial.y);
+  lon_geo = lon_world - GAST. (Latitude is unaffected by the spin.)
+- Sun direction: use ONE sun vector for surface shading, cloud lighting and
+  atmosphere so the terminator matches across all of them. Mixing two sun sources
+  (e.g. one from your own time code and one from a library's ECEF helper in a
+  different frame) caused us a 90-degree "double terminator". Keep it single.
+- Imagery prime meridian: web-mercator XYZ sources (ESRI, GIBS) agree with each
+  other; if the whole globe looks rotated vs your satellites, that's a single
+  offset to dial in (a rotation about the polar axis), not a per-layer fix.
+
+
+-------------------------------------------------------------------------------
+9. QUICK DEBUG RECIPES
+-------------------------------------------------------------------------------
+- "Cone / ground marker is under the surface": check the surface is at radius 1.0
+  (ellipsoid pin), then give the marker depthWrite:false + renderOrder:1.
+- "Satellites vanish over the globe": your surface is transparent -> make it
+  opaque (§5A).
+- "Satellites vanish against space": a depth-reading effect is overwriting them ->
+  depthWrite:true on the points, or a layer-based overlay pass (§5B/§6).
+- "Clouds float off the surface": a scale mismatch -> make sure surface = radius
+  1.0 and clouds/atmosphere share one worldToECEF with the same ground radius (§2).
+- "Two shells flicker (z-fight)": separate them a few km, or polygonOffset, before
+  touching near/far.
+- "Whole globe rotated vs satellites": single polar-axis offset, not per-layer.
+- Sanity numbers: surface 1.000, ISS 1.064, GEO 6.62, Moon ~60.3. If a satellite
+  isn't roughly at its expected radius, the bug is in the satellite frame/scale,
+  not depth.
+
+
+-------------------------------------------------------------------------------
+10. REFERENCES
+-------------------------------------------------------------------------------
+  three.js Layers:        https://threejs.org/docs/#api/en/core/Layers
+  Object3D.layers:        https://threejs.org/docs/#api/en/core/Object3D.layers
+  Camera.layers:          https://threejs.org/docs/#api/en/cameras/Camera.layers
+  Material depth flags:   https://threejs.org/docs/#api/en/materials/Material
+                          (depthTest, depthWrite, transparent, polygonOffset)
+  Object3D.renderOrder:   https://threejs.org/docs/#api/en/core/Object3D.renderOrder
+  Log depth buffer demo:  https://threejs.org/examples/#webgl_camera_logarithmicdepthbuffer
+  pmndrs postprocessing:  https://github.com/pmndrs/postprocessing
+  three.js forum (search "render on top keep depth", "transparency sorting"):
+                          https://discourse.threejs.org/
+
+  Constants we used:
+    EARTH_RADIUS_METERS = 6_371_000   (1 ER)
+    camera near/far     = 0.01 / 1000  ER
+    surface radius      = 1.0  (pin the tile ellipsoid to a sphere to guarantee it)
+===============================================================================

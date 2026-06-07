@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { EarthRenderer } from './EarthRenderer';
+import { EarthGroupManager } from './geospatial';
 import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
@@ -22,6 +22,7 @@ import { simClock } from './SimClock';
 import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
+import { RenderPipeline } from './RenderPipeline';
 
 const EARTH_RADIUS_KM = 6371;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
@@ -35,8 +36,9 @@ export class Engine {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private clock: THREE.Clock;
-  private earthRenderer: EarthRenderer;
+  private earthRenderer: EarthGroupManager;
   private starfieldRenderer: StarfieldRenderer;
+  private renderPipeline: RenderPipeline | null = null;
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
@@ -69,7 +71,12 @@ export class Engine {
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
+    // antialias:false is deliberate. The Takram atmosphere is a depth-reading post-process; any
+    // MSAA in the pipeline forces a depth resolve (glBlitFramebuffer) where the read & write
+    // depth-stencil attachments collide → "Read and write depth stencil attachments cannot be the
+    // same image" and the atmosphere collapses. We keep the whole depth path single-sampled (this +
+    // composer multisampling:0) and recover edge AA via an SMAA pass the composer owns.
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, canvas });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -100,8 +107,9 @@ export class Engine {
     this.scene.add(this.starfieldRenderer.object);
 
     const maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    this.earthRenderer = new EarthRenderer(maxAnisotropy, this.renderer, this.camera);
+    this.earthRenderer = new EarthGroupManager(maxAnisotropy, this.renderer, this.camera, this.scene);
     this.scene.add(this.earthRenderer.object);
+    console.log("Earth Object Radius/Size:", this.earthRenderer);
 
     // ── Satellites ───────────────────────────────────────────────────────────
     this.satelliteRenderer = new SatelliteRenderer(this.scene);
@@ -197,6 +205,35 @@ export class Engine {
 
     // ── Load TLE data and start propagation ───────────────────────────────────
     this.initWorker();
+
+    // ── Geospatial Takram modules + post-processing pipeline (fire-and-forget) ──
+    void this.initGeospatial();
+  }
+
+  /**
+   * Initialise the geospatial Takram modules and route rendering through the post-processing
+   * EffectComposer. Fire-and-forget: until this resolves the app renders the fallback Earth via
+   * a direct `renderer.render()`. Once the pipeline is up, tone mapping moves into the composer
+   * (renderer tone mapping disabled to avoid double application). Any failure falls back to the
+   * direct render path with renderer-level ACES restored.
+   */
+  private async initGeospatial(): Promise<void> {
+    // Bring the composer online immediately as a transparent pass-through (always-on), so the
+    // EffectComposer ↔ GPUPicker path is exercised from startup and tone mapping is owned by the
+    // pipeline. If the composer can't be created the app stays on the direct render path.
+    try {
+      this.renderPipeline = new RenderPipeline(this.renderer, this.scene, this.camera);
+      this.renderer.toneMapping = THREE.NoToneMapping;
+    } catch (err) {
+      console.warn('[geospatial] render pipeline unavailable, using direct render:', err);
+      this.renderPipeline = null;
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    }
+
+    // Init Takram modules (async LUT loads); each failure is contained inside initModules, so it
+    // never rejects. Then feed any ready effects into the existing pipeline.
+    await this.earthRenderer.initModules(this.renderPipeline !== null);
+    this.renderPipeline?.setEffects(this.earthRenderer.getPostProcessEffects());
   }
 
   private async initWorker(): Promise<void> {
@@ -397,29 +434,29 @@ export class Engine {
 
     const counts = result.isSnap
       ? this.satelliteRenderer.snapPositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalogData,
-          state.categoryFilters,
-          state.regimeFilters,
-          this.getVisualNoradIds()
-        )
+        result.positions,
+        result.validFlags,
+        result.objectCount,
+        observerPos,
+        sunDir,
+        state.visibilityMode,
+        this.catalogData,
+        state.categoryFilters,
+        state.regimeFilters,
+        this.getVisualNoradIds()
+      )
       : this.satelliteRenderer.updatePositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalogData,
-          state.categoryFilters,
-          state.regimeFilters,
-          this.getVisualNoradIds()
-        );
+        result.positions,
+        result.validFlags,
+        result.objectCount,
+        observerPos,
+        sunDir,
+        state.visibilityMode,
+        this.catalogData,
+        state.categoryFilters,
+        state.regimeFilters,
+        this.getVisualNoradIds()
+      );
 
     useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
@@ -757,7 +794,11 @@ export class Engine {
       this.renderer.getPixelRatio(),
     );
     this.orbitTrailRenderer.setJoyrideMode(cameraMode === 'following' && trackingStyle === 'joyride');
-    this.renderer.render(this.scene, this.camera);
+    if (this.renderPipeline) {
+      this.renderPipeline.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   };
 
   selectByIndex(index: number): void {
@@ -950,6 +991,7 @@ export class Engine {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.renderPipeline?.resize(width, height);
   };
 
   dispose(): void {
@@ -983,6 +1025,7 @@ export class Engine {
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();
     this.starfieldRenderer.dispose();
+    this.renderPipeline?.dispose();
     this.renderer.dispose();
   }
 }

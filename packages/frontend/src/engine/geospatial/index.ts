@@ -3,8 +3,6 @@ export { FallbackEarthSurface } from './FallbackEarthSurface';
 export { CoordinateBridge } from './CoordinateBridge';
 export { AtmosphereModule } from './AtmosphereModule';
 export { CloudsModule } from './CloudsModule';
-export { StarsModule } from './StarsModule';
-export { SunMoonModule } from './SunMoonModule';
 export { TileEarthSurface } from './TileEarthSurface';
 export { WeatherTextureService } from './WeatherTextureService';
 export type { GeospatialModule, GeospatialContext, FrameState } from './types';

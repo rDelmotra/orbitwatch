@@ -1,0 +1,147 @@
+Current repo = space is fixed, Earth spins.
+
+If you remember only one sentence, remember that.
+
+The Four Things
+
+ECI
+Meaning: inertial space frame.
+Use here for: satellites, Sun, and the overall scene.
+Mental picture: stars and orbital planes make sense here.
+
+ECEF
+Meaning: Earth-fixed frame.
+Use here for: latitude/longitude, ground positions, “what country is underneath.”
+Mental picture: Earth map coordinates.
+
+GMST/GAST
+Meaning: the rotation angle between inertial space and Earth-fixed geography.
+Use here for: rotating Earth relative to the inertial scene.
+Mental picture: “how far has Earth turned since the reference orientation?”
+
+Sun
+Meaning: a direction in space, not glued to Earth.
+Use here for: lighting in the inertial scene.
+Mental picture: the Earth rotates under the sunlight.
+
+This Project’s Actual Model
+
+Scene/world frame: ECI
+Satellite positions from worker: ECI/TEME, then axis-swapped into Three.js
+Earth globe: a mesh at origin that rotates by sidereal angle every frame
+Earth geography: becomes correct because the mesh rotates
+Sun direction: computed in ECI, passed directly to shaders
+Starfield: visual backdrop, consistent with inertial-space thinking
+You can see that directly in:
+
+CLAUDE.md (line 127)
+time.ts
+Engine.ts (line 258)
+What GMST/GAST Is Doing Here
+Think of GMST/GAST as a conversion angle, not a place.
+
+If you have an inertial scene and want Earth geography to line up:
+Rotate Earth by sidereal angle.
+If you had an Earth-fixed scene instead:
+Keep Earth still, and rotate satellites and Sun into Earth-fixed coordinates.
+That is why the HTML plan and the repo differ. They chose opposite scene conventions.
+
+Where Is the Sun?
+In this repo, the Sun is in ECI.
+
+That means:
+
+getSunDirection(now) returns an inertial-space direction.
+Engine.ts copies that direction into the Earth shaders.
+The Earth mesh rotates by getGAST(now).
+Result: day/night moves correctly because Earth turns under a fixed Sun.
+The key comment is in time.ts:
+“No GAST rotation is applied here … Engine rotates the Earth mesh.”
+
+So:
+
+Sun does not get GMST-rotated in the current project.
+Earth does.
+Never Mix These Up Again
+Ask this first:
+
+What is my scene frame?
+
+If answer is ECI:
+
+satellites in ECI
+Sun in ECI
+Earth rotates by GMST/GAST
+If answer is ECEF:
+
+Earth stays still
+satellites converted to ECEF
+Sun rotated into ECEF for lighting
+Pick one. Never blend them halfway.
+
+Tailored Mnemonic
+For this repo:
+
+Satellites and Sun live in space. Earth turns to meet them.
+
+That is the whole model.
+
+One Small Naming Note
+Your function is called getGAST, but the implementation/comments in time.ts are really serving as the sidereal Earth-rotation angle for rendering. For project thinking, treat it as:
+
+the angle used to rotate Earth in the inertial scene
+
+That will keep you sane even if the astronomy naming gets fuzzy.
+
+
+===============================================================================
+RECAP FOR A FRESH RE-CODE (the concrete bits, self-contained)
+===============================================================================
+
+SCENE UNIT
+  1 world unit = 1 Earth radius (ER) = 6,371,000 m = 6371 km.
+  So an object's distance from origin is just "radius in ER":
+      radius_ER = 1 + altitude_km / 6371
+  (Why it matters: clouds/atmosphere are razor-thin in these units — see
+  04_DEPTH_ALIGNMENT.txt §1-2. Keep ONE unit everywhere; surface at radius 1.0.)
+
+AXIS SWAP (worker ECI/TEME -> three.js)
+  The SGP4 worker gives ECI/TEME (x, y, z). three.js is Y-up, and we treat the
+  ECI Z axis (north pole) as three.js Y. The mapping we use:
+      three.x =  eci.x
+      three.y =  eci.z
+      three.z = -eci.y
+  Apply the same swap to satellites, the Sun, and anything else coming from the
+  inertial frame, so they all share one convention.
+
+WHERE THE TWO ANGLES/DIRS ARE SET (per frame)
+  - Earth spin:  earthGroup.rotation.y = getGAST(now)   (the Earth mesh/Group)
+  - Sun:         sunDir = getSunDirection(now)  (ECI, already swapped to three.js)
+                 -> written into the Earth/surface shaders and (if used) the
+                    atmosphere/clouds. ONE sun source for everything (mixing a
+                    second ECEF sun source caused a 90-degree double terminator).
+
+ECI <-> ECEF (when a layer needs Earth-fixed)
+  ECEF = ECI rotated by -GAST about the polar (scene-Y) axis. Two common needs:
+  - Physically-based atmosphere/clouds that work in ECEF metres: feed them
+      worldToECEF = Scale(metresPerUnit) * RotY(-GAST)
+    (see 06_TAKRAM_ATMOSPHERE.txt). This is the SAME -GAST that spins the Earth,
+    just inverted, so everything stays locked.
+  - Sampling a surface-fixed (geographic) texture in a shader: take the fragment's
+    world radial and remove GAST. Latitude is unaffected by spin:
+      lat     = asin(worldRadial.y)
+      lon_geo = lon_world - GAST          (lon_world = atan2 of the radial)
+    Used for night lights / snow-ice masks that are pinned to geography.
+
+PARENTING RULE (keeps alignment automatic)
+  Parent everything "fixed to the ground" (surface tiles, cloud/atmosphere shells,
+  observer marker) to the Earth Group that you rotate by GAST. Leave inertial
+  things (satellites, Sun, starfield) in the scene root. Then geography lines up
+  under the satellites for free, and you never hand-sync rotations.
+
+SOURCE-OF-TRUTH FILES IN THE CURRENT CODE (for cross-checking during a re-code)
+  - orbital/time.ts        : getGAST(now), getSunDirection(now)
+  - engine/Engine.ts       : sets earthGroup.rotation.y and copies the sun each frame
+  - geospatial/CoordinateBridge.ts : ECI->ECEF helpers (sun + camera) for effects
+  (Line numbers drift; search by symbol.)
+===============================================================================

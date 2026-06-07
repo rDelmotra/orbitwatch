@@ -1,0 +1,117 @@
+===============================================================================
+06 — TAKRAM ATMOSPHERE (Bruneton aerial perspective)  — THIS ONE WORKS
+===============================================================================
+Package: @takram/three-atmosphere (we used ^0.19).
+Repo:    https://github.com/takram-design-engineering/three-geospatial
+This is the single biggest realism win for the astronaut/ISS look (blue limb,
+sky, sun, and aerial haze softening the day side toward the horizon). Import the
+VANILLA entry points, not the /r3f ones.
+
+
+-------------------------------------------------------------------------------
+1. WHAT IT IS
+-------------------------------------------------------------------------------
+`AerialPerspectiveEffect` is a screen-space post-process (so you need the pipeline
+in 05). It reads the depth buffer to reconstruct world positions, then adds
+physically-based scattering. It needs precomputed scattering LUTs (textures).
+
+
+-------------------------------------------------------------------------------
+2. LUTs — LOAD ONCE, SHARE
+-------------------------------------------------------------------------------
+  import { PrecomputedTexturesLoader, DEFAULT_PRECOMPUTED_TEXTURES_URL } from '@takram/three-atmosphere'
+  const loader = new PrecomputedTexturesLoader(); loader.setType(renderer)
+  const textures = await new Promise((res, rej) =>
+    loader.load(DEFAULT_PRECOMPUTED_TEXTURES_URL, res, undefined, rej))
+
+Load these ONCE in the orchestrator and pass via ctx.atmosphereTextures, because
+the clouds effect (if you ever use it) wants the same LUTs. The orchestrator owns
+and disposes them; the atmosphere layer just consumes them. If the load fails
+(network/CORS), skip the atmosphere (and clouds) and keep the fallback shells.
+(Hardening option: vendor the bundled assets into /public instead of the hosted URL.)
+
+
+-------------------------------------------------------------------------------
+3. THE COORDINATE / SCALE BRIDGE (the crux — get this right)
+-------------------------------------------------------------------------------
+Our scene is ECI, Y-up, 1 unit = 1 ER. Takram works in ECEF metres. The effect
+reconstructs world positions and transforms them by `worldToECEFMatrix`. Per frame:
+
+  const s = AtmosphereParameters.DEFAULT.bottomRadius   // ~6,360,000 m
+  worldToECEFMatrix = Scale(s, s, s) * RotY(-GAST)
+  effect.worldToECEFMatrix.copy(...)
+  effect.sunDirection.copy(frame.sunDirectionECEF)
+
+  // ellipsoid spherical at the same radius so altitude correction is a no-op:
+  new AerialPerspectiveEffect(camera, { ...textures, ellipsoid: new Ellipsoid(s,s,s),
+                                        correctAltitude: false, /* options below */ })
+
+Why s = bottomRadius: it maps scene radius 1.0 EXACTLY onto the atmosphere's ground
+radius, so the surface and the atmosphere base coincide with no gap/overlap. The
+Bruneton ground (~6360 km) vs our Earth (6371 km) differ by ~0.17% / 11 km — that's
+invisible for scattering and for where clouds sit, AS LONG AS every layer that uses
+this bridge uses the SAME s (see 04 §2 for the distance reasoning).
+
+
+-------------------------------------------------------------------------------
+4. OPTIONS + THE MERGE STRATEGY (what looked right)
+-------------------------------------------------------------------------------
+  new AerialPerspectiveEffect(camera, {
+    ...textures, ellipsoid, correctAltitude: false,
+    sky:    true,    // render the limb + sky against space
+    sun:    true,    // sun disk
+    moon:   false,   // skip (its frame would be misplaced like the sun was)
+    ground: false,   // do NOT re-light the surface
+  })
+
+Why ground:false — the MERGE idea: let the SURFACE shader own day/night and the
+sunset/sunrise rim (the tile relight in 03), and let Takram add ONLY the sky + limb
+on top. With ground:true you get a second, doubled night side and a "blanket"
+re-darkening that fought the surface. sky:true still applies aerial-perspective haze
+to the existing surface geometry, which is exactly the day-side softening you want.
+
+
+-------------------------------------------------------------------------------
+5. ONE SUN SOURCE (the 90-degree double-terminator lesson)
+-------------------------------------------------------------------------------
+Feed the atmosphere the SAME sun that lights the surface: the scene/ECI sun rotated
+to ECEF by the CoordinateBridge (frame.sunDirectionECEF). We briefly added a
+separate module using astronomy-engine's getSunDirectionECEF — its ECEF frame is
+rotated relative to our convention, which produced a visible 90-degree DOUBLE
+terminator (the atmosphere's day/night line disagreed with the surface's). We
+deleted that module. Lesson: derive every layer's sun from one source. (Keeping the
+existing getSunDirection() for satellite lighting is fine — it's the same ECI sun.)
+
+
+-------------------------------------------------------------------------------
+6. SATELLITES + THE SKY PASS (heads-up, detail in 04 §5)
+-------------------------------------------------------------------------------
+The sky pass repaints pixels that have NO geometry depth as sky. Transparent
+satellite points drawn with depthWrite:false leave no depth, so against space they
+get painted over and vanish. Simple fix: give those points depthWrite:true so they
+register as geometry. (Robust alternative: a layer-based overlay pass — 04 §6.)
+
+
+-------------------------------------------------------------------------------
+7. TUNING + FAILSAFE
+-------------------------------------------------------------------------------
+- Status when we left it: "looks good, exposure/limb need tuning." The day side can
+  read bright because the atmosphere adds inscatter on top of the surface; there are
+  two brightness knobs — the surface day-exposure (03) and the composer/atmosphere
+  exposure. Adjust whichever dominates.
+- Failsafe: the effect is owned by the pipeline's EffectPass; the LUTs by the
+  orchestrator. Only hide the fallback atmosphere shell when the effect is actually
+  ready AND a pipeline exists (ctx.postProcessingAvailable) — otherwise the effect
+  has nowhere to render and the limb just disappears.
+
+
+-------------------------------------------------------------------------------
+8. QUICK CHECKLIST
+-------------------------------------------------------------------------------
+  [ ] LUTs loaded once, shared, disposed by the owner
+  [ ] worldToECEF = Scale(bottomRadius)*RotY(-GAST); spherical ellipsoid; correctAltitude false
+  [ ] sky/sun on, ground/moon off (merge with the surface shader)
+  [ ] sun from the scene bridge, not a second source
+  [ ] satellites write depth (so the sky pass doesn't eat them)
+  [ ] fallback atmosphere hidden only on success + when a pipeline exists
+===============================================================================

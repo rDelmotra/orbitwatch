@@ -1,0 +1,108 @@
+===============================================================================
+05 — POST-PROCESSING PIPELINE (EffectComposer) + the depth saga
+===============================================================================
+Library: pmndrs `postprocessing` (we used ^6.39).  https://github.com/pmndrs/postprocessing
+
+When you actually need this:
+  ONLY once you add a screen-space effect that reads the depth buffer — i.e. the
+  Takram atmosphere (06). Tiles, relight, night lights, a 2D cloud shell — none of
+  those need a composer; render them as ordinary scene objects with
+  renderer.render(scene, camera). Don't add the composer before you need it.
+
+
+-------------------------------------------------------------------------------
+1. THE WORKING CONFIG (what survived all the trial and error)
+-------------------------------------------------------------------------------
+  renderer = new WebGLRenderer({ antialias: false, canvas })   // see §2 why false
+  renderer.outputColorSpace = SRGBColorSpace
+  renderer.toneMapping = NoToneMapping        // composer owns tone mapping instead
+
+  composer = new EffectComposer(renderer, {
+    multisampling: 0,                          // load-bearing — see §2
+    frameBufferType: HalfFloatType,            // keep scene linear-HDR until tonemap
+  })
+  composer.addPass(new RenderPass(scene, camera))
+  // ... effect pass(es) ...
+  effectPass = new EffectPass(camera, ...geospatialEffects, new ToneMappingEffect({ mode: ACES_FILMIC }))
+  smaaPass   = new EffectPass(camera, new SMAAEffect({ preset: HIGH }))   // AA, last
+
+Engine render loop: if composer exists -> composer.render(); else renderer.render().
+The effects you pass come from the orchestrator's getPostProcessEffects(), so their
+ORDER is just the layer registration order (clouds before atmosphere, etc.).
+
+
+-------------------------------------------------------------------------------
+2. THE DEPTH-BLIT ERROR (read this before touching MSAA/depth)
+-------------------------------------------------------------------------------
+Error you'll see:
+  GL_INVALID_OPERATION: glBlitFramebuffer: Read and write depth stencil
+  attachments cannot be the same image.
+Symptom: the atmosphere flashes then collapses to flat blue, or just spams console.
+
+Cause + fix #1 (MSAA): a depth-reading effect samples the depth buffer. With MSAA
+the composer keeps depth in a multisampled renderbuffer and must blit-resolve it
+before sampling — and that resolve hits the error, leaving garbage depth.
+  FIX (load-bearing for the atmosphere): multisampling: 0 on the composer AND
+  antialias: false on the renderer, so NOTHING in the depth path is multisampled.
+  Recover edge AA with an SMAAEffect pass at the very end (on the tone-mapped image).
+This combination made the atmosphere stable.
+
+Cause #2 (the clouds — UNRESOLVED): the Takram volumetric CloudsEffect does its
+own internal shadow/raymarch/temporal RENDER passes. Those re-trigger the same
+blit error even with multisampling already 0, because the effect reads a depth
+texture that is also a bound framebuffer attachment during its own rendering.
+  Attempted fix: a dedicated pmndrs DepthPass (renders scene depth into a STANDALONE
+  DepthTexture) + cloudsEffect.setDepthTexture(depthPass.texture) + clouds isolated
+  in their own EffectPass. It did NOT fully resolve it (error persisted, clouds
+  rendered nothing, and the extra depth render tanked mid-range FPS to ~25).
+  Conclusion: see 07 — volumetric clouds from orbit aren't viable here right now;
+  the 2D cloud path needs none of this.
+
+So: the atmosphere's depth need is satisfied by pmndrs automatically (it's a simple
+fullscreen effect). The clouds' depth need is the thing that fought back.
+
+
+-------------------------------------------------------------------------------
+3. DepthPass (kept for reference, in case a future depth-effect needs it)
+-------------------------------------------------------------------------------
+pmndrs DepthPass(scene, camera) renders scene depth into its own render target;
+`depthPass.texture` is a real DepthTexture (BasicDepthPacking), decoupled from the
+ping-pong buffers. Feed it to an effect via effect.setDepthTexture(depthPass.texture)
+and isolate that effect in its own EffectPass. Costs a second scene depth render
+(real cost with 30k+ points) — only enable it when such an effect is active. A
+cheaper alternative is DepthCopyPass (copies existing depth, no scene re-render),
+but watch its depthPacking (defaults to RGBADepthPacking).
+
+
+-------------------------------------------------------------------------------
+4. GPU PICKER COEXISTENCE
+-------------------------------------------------------------------------------
+The color-ID GPU picker renders to its OWN render target with its own setRenderTarget
+calls. It saved/restored renderer state and kept working alongside the composer in
+our setup. If you refactor the pipeline, re-verify picking still selects correctly
+(it's an easy thing to break by leaving a render target bound).
+
+
+-------------------------------------------------------------------------------
+5. COLOR / TONE MAPPING
+-------------------------------------------------------------------------------
+- Scene renders linear into HalfFloat buffers; the composer's ToneMappingEffect
+  (ACES) maps HDR->display LAST; SMAA runs after that on the display-referred image.
+- Because the composer owns tone mapping, set renderer.toneMapping = NoToneMapping
+  so it isn't applied twice.
+- Without a composer (tiles-only / pre-atmosphere), just use
+  renderer.toneMapping = ACESFilmicToneMapping + outputColorSpace = SRGBColorSpace.
+- Tile textures come tagged sRGB by the tile plugin, so there's no "sRGB read as
+  linear -> too bright" trap (see 03).
+
+
+-------------------------------------------------------------------------------
+6. QUICK CHECKLIST
+-------------------------------------------------------------------------------
+  [ ] composer multisampling: 0 and renderer antialias: false (depth-reading effects)
+  [ ] SMAA pass last for AA
+  [ ] tone mapping in the composer; renderer.toneMapping = NoToneMapping
+  [ ] effect order = layer registration order (getPostProcessEffects)
+  [ ] GPU picking still selects after pipeline changes
+  [ ] no composer at all if nothing reads depth yet
+===============================================================================

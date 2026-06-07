@@ -1,0 +1,98 @@
+===============================================================================
+07 — CLOUDS: the volumetric dead-end (from orbit) + the path that ships
+===============================================================================
+Package: @takram/three-clouds (we used ^0.7).
+Short version: Takram's volumetric clouds are gorgeous on the ground, but rendering
+them FROM SPACE is on their roadmap (unfinished), and we couldn't get them working
+here. The pragmatic, reliable "live clouds" is a 2D layer. Read §1 so you don't
+re-spend the time we did; build §3.
+
+
+-------------------------------------------------------------------------------
+1. THE VOLUMETRIC ATTEMPT — what we tried and why it didn't pan out
+-------------------------------------------------------------------------------
+What it needs (all wired, compiles clean):
+  - CloudsEffect(camera, options, AtmosphereParameters.DEFAULT)
+  - procedural noise: CloudShape, CloudShapeDetail, Turbulence, LocalWeather
+    (coverage), all from @takram/three-clouds, assigned directly to the effect
+  - STBN blue-noise: STBNLoader + DEFAULT_STBN_URL from @takram/three-geospatial
+  - the SAME Bruneton LUTs as the atmosphere (share them — see 06)
+  - same world->ECEF bridge + sun as the atmosphere (06 §3/§5)
+  - perf knobs: qualityPreset 'low'|'medium'|'high'|'ultra', resolutionScale (<1),
+    temporalUpscale, lightShafts
+  - register BEFORE the atmosphere so the atmosphere composites over the clouds
+
+Why it stalled here:
+  - Takram's own README lists "support rendering views from space" and "introduce
+    global cloud coverage" as FUTURE items. Our two requirements are exactly those.
+  - The CloudsEffect runs its own internal shadow/raymarch/temporal render passes,
+    which re-trigger the depth-blit error (05 §2) even with multisampling 0.
+  - Attempted fix (dedicated DepthPass + setDepthTexture + clouds in their own
+    EffectPass) did NOT resolve it: error persisted, clouds rendered nothing while
+    still costing GPU, and the extra depth render dropped mid-range FPS to ~25.
+  - It also destabilised the atmosphere when they shared a pass.
+
+Verdict: not viable from orbit right now. Keep the code behind a flag
+(ENABLE_TAKRAM_CLOUDS = false) for when Takram ships from-space support — but don't
+gate the product on it. If you DO retry, treat "do clouds even render from orbit at
+all, with stable depth and acceptable FPS" as an early GATE before building any
+live-data plumbing on top (we learned to gate after the fact).
+
+
+-------------------------------------------------------------------------------
+2. HONEST TRADE-OFF
+-------------------------------------------------------------------------------
+Volumetric = true 3D puffs you can fly through, self-shadowing — stunning, but
+heavy and (here) unfinished from space. 2D = a painted cloud layer on a shell —
+flat, no fly-through, but reliable, cheap, and it can be LIVE (today's weather).
+For an orbital/ISS view, the 2D layer reads well and is the right call now.
+
+
+-------------------------------------------------------------------------------
+3. THE PATH THAT SHIPS — a live 2D cloud layer (recommended)
+-------------------------------------------------------------------------------
+Treat clouds like the night-lights layer in 03: a second thing draped on a shell
+just above the surface, relit by the same day/night sun, fed by live imagery.
+
+Two ways to build it, both fine:
+  (a) A cloud SHELL: one sphere at ~1.001-1.003 ER with a global cloud texture
+      (alpha = cloudiness), rotated with the Earth group. Simplest.
+  (b) A cloud TILE layer: a second TilesRenderer (like Black Marble in 03) with a
+      cloud imagery source, so it sharpens when you zoom. More moving parts.
+
+Data (see 08 for the exact endpoints/quirks):
+  - A near-current global cloud image from NASA GIBS. Cloud-only data is coarse;
+    true-color shows clouds but mixes in snow/desert. Pick per taste:
+      * cloud-fraction product = "correct" but coarse/blocky,
+      * true-color whiteness = sharper but flags bright ground.
+  - Refresh daily (or your cadence); crossfade on update; hold last-good on failure.
+
+Lighting/relight: reuse the day/night terminator term from the tile relight (03 §7)
+so clouds darken on the night side and catch warm light near the terminator. Keep
+them just above the surface so they don't detach (04 §1-2: 1 km = 0.000157 ER —
+thin!). Make the shell/tiles fail safe (no texture -> no clouds, never a crash).
+
+Distance correctness still matters here: a 2D shell at the wrong radius looks like a
+detached bubble. Park it within the first few km of altitude.
+
+
+-------------------------------------------------------------------------------
+4. ICE / SNOW (often wanted alongside "live clouds")
+-------------------------------------------------------------------------------
+Snow + sea-ice are a separate, slower-moving signal. Cheapest approach: a global
+"cryosphere" mask (GIBS snow cover + sea-ice concentration, coarse ~12-25 km) used
+as a WHITENING tint inside the day surface shader, sampled by GEOGRAPHIC lat/lon
+(world radial with GAST removed — 02 recap). Not a cloud; a surface tint. Daily
+refresh, last-good failsafe, no tint if the texture is missing.
+
+
+-------------------------------------------------------------------------------
+5. QUICK CHECKLIST (for the 2D path)
+-------------------------------------------------------------------------------
+  [ ] cloud layer is its own module (shell or tile), fail-safe
+  [ ] sits within the first few km of altitude (hugs the surface)
+  [ ] relit by the same terminator as the surface (dark on the night side)
+  [ ] live source with daily refresh + crossfade + last-good
+  [ ] ice/snow as a separate surface tint, not a cloud
+  [ ] volumetric code (if kept) stays behind a flag, default off
+===============================================================================

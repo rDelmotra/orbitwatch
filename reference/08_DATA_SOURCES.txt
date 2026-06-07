@@ -1,0 +1,99 @@
+===============================================================================
+08 — EXTERNAL DATA SOURCES (all the feeds in one place)
+===============================================================================
+Everything the Earth pulls from the network, with the quirks we actually hit.
+"Verified" = we curled/ran it this session. Re-check before prod; these services
+change layer names and availability over time.
+
+
+-------------------------------------------------------------------------------
+1. ESRI WORLD IMAGERY  (daytime surface)  — verified
+-------------------------------------------------------------------------------
+  https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+  - Format image/jpeg. CORS open. Free, no API key.
+  - URL order {z}/{y}/{x} = level / ROW / COL.
+  - Deep zoom (~19+), sub-meter in many places.
+  - Attribution: Esri / Maxar / Earthstar / etc. Fine for dev; check terms for prod.
+  - This is the high-res daytime layer in 03.
+
+
+-------------------------------------------------------------------------------
+2. NASA GIBS  (night lights, clouds, ice)  https://nasa-gibs.github.io/gibs-api-docs/
+-------------------------------------------------------------------------------
+GIBS serves both WMTS tiles (EPSG:3857 web-mercator and EPSG:4326 geographic) and
+WMS GetMap (single composited image). CORS: Access-Control-Allow-Origin: * (works
+from the browser). Capabilities (lists every layer + its tile matrix set / max
+zoom / format):
+  https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml
+
+NIGHT LIGHTS — VIIRS Black Marble  — verified
+  https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png
+  - Gotcha: PNG, not JPG (.jpg returns HTTP 400 "FORMAT is invalid for LAYER").
+  - Gotcha: zoom 0-8 only (z9 = HTTP 400). Cap with the plugin's `levels` (9 levels).
+  - ~500 m/pixel native (VIIRS limit) and a STATIC 2016 yearly composite. It will
+    always look softer than the day imagery, and it isn't "today". No higher-res
+    free global night source exists. (Used in 03 for city lights.)
+
+CLOUDS (for the 2D path in 07) — pick one, both coarse/daily:
+  - Cloud-fraction products (e.g. MODIS_*_Cloud_Fraction*): "correct" cloud signal
+    but coarse and color-mapped (sample luminance -> coverage). Many cloud SCIENCE
+    products exist in capabilities (cloud top, liquid water, effective radius) —
+    most are scientific colormaps, not pretty visuals.
+  - True-color (MODIS_*_CorrectedReflectance_TrueColor): 250 m, daily, sharp, but
+    clouds are mixed with snow/desert/glint (whiteness != clouds). VIIRS true-color
+    also available. Trade sharpness for false positives.
+  - There is NO free global high-res cloud-ONLY image. Accept coarse, or accept
+    true-color's false positives.
+
+SNOW / SEA ICE (for the cryosphere tint in 07 §4) — coarse:
+  - Snow cover: MODIS_*_Snow_Cover, or AMSRU2_Snow_Water_Equivalent_Daily.
+  - Sea ice: AMSRU2_Sea_Ice_Concentration_25km (or _12km), GHRSST sea-ice products.
+  - These are ~12-25 km — fine as a tint, not for sharp edges.
+
+ONE GLOBAL EQUIRECT IMAGE the easy way — WMS GetMap:
+  https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap
+    &VERSION=1.3.0&LAYERS=<layer>&CRS=EPSG:4326&BBOX=-90,-180,90,180
+    &WIDTH=2048&HEIGHT=1024&FORMAT=image/png&TIME=<YYYY-MM-DD>
+  Simpler than compositing tiles when you want one global texture (clouds/ice masks).
+  Verify CORS on the WMS endpoint; if it's stricter than the tile endpoint, fall
+  back to stitching a few EPSG:4326 tiles. Load images crossOrigin='anonymous'.
+
+REFRESH CADENCE: most of these update ~daily (MODIS/VIIRS). For near-real-time
+regional cloud motion, geostationary (GOES/Himawari, ~10 min) exist but are
+regional, not global. Crossfade on refresh; hold last-good on failure.
+
+
+-------------------------------------------------------------------------------
+3. JPL HORIZONS  (deep-space object ephemeris)  — already in the backend
+-------------------------------------------------------------------------------
+Not part of the Earth rendering, but it's the other external feed. The backend
+`dso/` namespace fetches J2000 state vectors from JPL Horizons, converts J2000->TEME
+once per cycle, and serves cached snapshots. If you're re-coding only the Earth/
+Takram visuals, leave this alone — it's isolated and works. (See CLAUDE.md "DSO".)
+
+
+-------------------------------------------------------------------------------
+4. DEPENDENCIES + PEER-DEP NOTE
+-------------------------------------------------------------------------------
+For tiles only: 3d-tiles-renderer peers on `three` (works with r173). Probably no
+.npmrc change needed.
+
+For Takram (atmosphere/clouds): the @takram packages peer-depend on React 19 +
+react-three-fiber, but we import ONLY their vanilla entry points (NOT the `/r3f`
+ones), so React stays 18. To make npm install resolve, the repo uses:
+    .npmrc -> legacy-peer-deps=true
+Packages used: postprocessing, @takram/three-atmosphere, @takram/three-clouds,
+@takram/three-geospatial, @takram/three-geospatial-effects, astronomy-engine
+(only if you use astro helpers — we ended up NOT relying on its sun; see 06 §5),
+3d-tiles-renderer.
+
+
+-------------------------------------------------------------------------------
+5. SANITY CHECK A FEED FAST
+-------------------------------------------------------------------------------
+  curl -s -o /dev/null -w "%{http_code} %{content_type}\n" "<tile or wms url>"
+  - 200 image/png|jpeg  -> good
+  - 400 text/xml        -> wrong format/zoom/layer (read the XML body)
+  Worldview to eyeball expected cloud/ice/lights for a date:
+    https://worldview.earthdata.nasa.gov
+===============================================================================

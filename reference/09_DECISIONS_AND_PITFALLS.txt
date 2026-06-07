@@ -1,0 +1,92 @@
+===============================================================================
+09 — DECISIONS, THINGS WE CUT, AND PITFALLS  (read before re-coding)
+===============================================================================
+The short "don't repeat my mistakes" file. Details live in the numbered files;
+this is the map + the reasoning.
+
+
+-------------------------------------------------------------------------------
+1. THINGS TRIED AND CUT (and why)
+-------------------------------------------------------------------------------
+- Single giant Earth texture ("32k"): dead end. GPUs clamp textures at 16384, a 32k
+  map is ~1 GB+ VRAM, and it's still soft up close. -> Streaming TILES instead (03).
+- Takram volumetric clouds FROM SPACE: unfinished in the library + a depth-blit /
+  no-render / ~25 FPS wall. Parked behind a flag. -> 2D live cloud layer (07).
+- A separate sun module (astronomy-engine getSunDirectionECEF): its ECEF frame was
+  rotated vs ours -> a 90-degree DOUBLE terminator. Deleted. -> one sun source (06 §5).
+- TilesFadePlugin: it animates per-tile opacity, which forces tile materials to stay
+  TRANSPARENT, which re-breaks satellite occlusion (03 §6). Dropped it; it's only a
+  cosmetic fade-in.
+- Takram stars: needed a fetched binary star catalog and coupled to the atmosphere
+  material for no benefit at orbital distance. Kept the existing simple starfield.
+- Atmosphere ground:true: re-darkened the surface and made a doubled night side
+  ("blanket"). -> ground:false; let the surface shader own day/night (06 §4).
+
+
+-------------------------------------------------------------------------------
+2. GOTCHA INDEX (symptom -> where it's explained)
+-------------------------------------------------------------------------------
+- Satellites vanish OVER the globe        -> transparent tiles overpaint them.
+                                             Make tiles opaque. 03 §6 / 04 §5A.
+- Satellites vanish AGAINST SPACE         -> a depth-reading effect's sky pass paints
+                                             over depth-less points. depthWrite:true,
+                                             or an overlay pass. 06 §6 / 04 §5B-6.
+- Ground marker / location cone sinks     -> surface slightly > radius 1.0 (WGS84
+                                             ellipsoid) + base z-fight. Pin ellipsoid
+                                             to a sphere; marker depthWrite:false +
+                                             renderOrder. 04 §4 / 03 §5.
+- glBlitFramebuffer depth error           -> MSAA depth resolve. multisampling 0 +
+                                             antialias false + SMAA. (Clouds re-trigger
+                                             it; see 07.) 05 §2.
+- Atmosphere collapses to flat blue       -> garbage depth from the blit above. Same
+                                             fix. 05 §2.
+- 90-degree double terminator             -> two different sun sources. One source. 06 §5.
+- Clouds float off the surface            -> scale mismatch; share one ground radius;
+                                             surface at radius 1.0. 04 §2 / 06 §3.
+- Night lights look low-res               -> they ARE (VIIRS ~500 m, zoom 8). Lower
+                                             the intensity rather than chase sharpness. 03 §10.
+- Everything too bright / washed          -> usually fine here (tiles tagged sRGB).
+                                             If a texture isn't, tag it SRGBColorSpace.
+
+
+-------------------------------------------------------------------------------
+3. PROCESS LESSONS
+-------------------------------------------------------------------------------
+- Gate risky/frontier features EARLY. Stand the thing up with placeholder data and
+  confirm it renders acceptably in the REAL view (e.g. from orbit, mid-joyride)
+  BEFORE building dependent layers (live data, etc.) on top. We built clouds
+  plumbing before proving clouds render from space, and had to unwind it.
+- When you can't iterate visually (e.g. a build-test-report loop with no live GPU),
+  prefer the RELIABLE path over the frontier one. A flat-but-live cloud layer beats
+  a beautiful-but-broken volumetric one that needs many blind iterations.
+- Keep failed experiments behind a flag, not deleted, IF the upstream might fix it
+  (volumetric clouds). Delete things that were just wrong (the second sun source).
+- Documentation tone: a guide beats a narrow path. Mark only the genuinely
+  load-bearing bits; leave room to choose.
+
+
+-------------------------------------------------------------------------------
+4. DON'T-REGRESS INVARIANTS (the handful that actually bit)
+-------------------------------------------------------------------------------
+  - Engine is a PLAIN CLASS, not a singleton (React StrictMode double-mounts in dev).
+  - One length unit: 1 world unit = 1 Earth radius; the surface sits at radius 1.0.
+  - ONE sun source for surface + atmosphere (+ clouds).
+  - High-res surface = TILES, not a bigger texture (16384 clamp).
+  - Composer multisampling: 0 (+ renderer antialias: false) whenever a depth-reading
+    effect is active; recover AA with SMAA.
+  - Tiles must be OPAQUE so transparent overlays (satellites) occlude correctly.
+  - Every class that makes a GL object implements dispose(); free uniform textures
+    and render targets by hand.
+  - Any layer can fail (try/catch at init AND update) without taking down the others
+    or the always-on fallback surface.
+
+
+-------------------------------------------------------------------------------
+5. STATE OF THE (UNCOMMITTED) CODE WHEN THESE NOTES WERE WRITTEN
+-------------------------------------------------------------------------------
+Working: tile day surface (ESRI) + night lights (Black Marble) + day/night relight;
+Takram atmosphere (needs exposure/limb tuning). Parked: volumetric clouds (flag off).
+The plan from here was a clean re-code with the module design in 01 — which is what
+these notes are for. Treat the current files as a working reference, not a template
+to copy verbatim.
+===============================================================================

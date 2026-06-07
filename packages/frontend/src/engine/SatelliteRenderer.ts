@@ -82,7 +82,13 @@ export class SatelliteRenderer {
         uTimeSinceArrival: { value: -1.0 },
       },
       transparent: true,
-      depthWrite: false,
+      // depthWrite ON so the points register in the depth buffer. The Takram atmosphere is a
+      // screen-space effect whose sky pass repaints every pixel that has NO geometry depth — with
+      // depthWrite:false the satellites left no depth and got overwritten by sky (they vanished
+      // against space). Writing depth marks them as geometry so the sky pass leaves them alone;
+      // far-side points are still occluded by the Earth via depthTest. Viewed from space the
+      // camera→satellite ray barely crosses atmosphere, so aerial-perspective dimming is negligible.
+      depthWrite: true,
       blending: THREE.NormalBlending,
     });
 

@@ -47,7 +47,11 @@ export class DsoRenderer {
         uSelectedDsoIndex: { value: -1.0 },
       },
       transparent: true,
-      depthWrite:  false,
+      // depthWrite ON: the Takram atmosphere's sky pass repaints depth-less (background) pixels, so
+      // deep-space objects against space were being overwritten and vanished. Writing depth marks
+      // them as geometry so the sky pass leaves them visible. (See SatelliteRenderer for the full
+      // rationale.)
+      depthWrite:  true,
       blending:    THREE.NormalBlending,
     });
 
