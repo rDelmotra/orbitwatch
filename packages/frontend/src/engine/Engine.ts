@@ -203,7 +203,7 @@ export class Engine {
       // ── DSO layer activation (worker client + subscriptions) ─────────────────
       // Guarded: if DSO init failed (non-critical) this is skipped; if activation
       // throws, World isolates it so DSO fails soft instead of failing the TLE init.
-      this.world.runLayerCommand(this.dsoLayer, 'activate', () =>
+      const dsoActivated = this.world.runLayerCommand(this.dsoLayer, 'activate', () =>
         this.dsoLayer.activate({
           onDsoTrail: (dsoId, positions) => {
             // Gate: only apply if trail is active and this DSO is selected
@@ -221,7 +221,11 @@ export class Engine {
 
       // Global DSO catalog/manifest polling (populates the store the DSO layer
       // reacts to) — data orchestration lives here, not in the visual layer.
-      initDsoClient().catch((err) => console.warn('DSO client init error:', err));
+      // Only start it if the DSO layer actually activated: no point feeding a
+      // disabled visual layer (keeps the "DSO fails soft" story honest).
+      if (dsoActivated) {
+        initDsoClient().catch((err) => console.warn('DSO client init error:', err));
+      }
 
       // ── TLE filters subscription ────────────────────────────────────────────
       let prevCatFilters = useStore.getState().categoryFilters;

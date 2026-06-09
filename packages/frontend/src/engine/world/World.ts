@@ -71,17 +71,22 @@ export class World {
    * escalate. Also guards against commands arriving before the layer's init has
    * resolved (returns + warns instead of silently dropping). Use this for any
    * layer method the Engine calls outside the `update(frame)` path.
+   *
+   * Returns true iff `fn` actually ran to completion — lets the caller gate
+   * dependent work (e.g. only start DSO data polling if DSO activation ran).
    */
-  runLayerCommand(layer: Layer, label: string, fn: () => void): void {
-    if (this.failed.has(layer)) return;
+  runLayerCommand(layer: Layer, label: string, fn: () => void): boolean {
+    if (this.failed.has(layer)) return false;
     if (!this.initialized.has(layer)) {
       console.warn(`[world] command "${label}" on "${layer.name}" before init — ignored`);
-      return;
+      return false;
     }
     try {
       fn();
+      return true;
     } catch (err) {
       this.handleFailure(layer, err, `command:${label}`);
+      return false;
     }
   }
 

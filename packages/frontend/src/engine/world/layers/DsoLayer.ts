@@ -2,6 +2,7 @@ import type * as THREE from 'three';
 import { DsoRenderer } from '../../DsoRenderer';
 import { DsoWorkerClient } from '../../dso/DsoWorkerClient';
 import { useStore } from '../../../store/useStore';
+import type { DsoObject } from '../../../data/dso-types';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 /**
@@ -32,6 +33,7 @@ export class DsoLayer implements Layer {
   private camera: THREE.PerspectiveCamera | null = null;
   private canvas: HTMLCanvasElement | null = null;
 
+  private callbacks: DsoLayerCallbacks | null = null;
   private dsoUnsub: (() => void) | null = null;
   private dsoEphemerisUnsub: (() => void) | null = null;
 
@@ -56,6 +58,7 @@ export class DsoLayer implements Layer {
    * the renderer needs the TLE count via `getTleCount`).
    */
   activate(callbacks: DsoLayerCallbacks): void {
+    this.callbacks = callbacks;
     this.client = new DsoWorkerClient({
       onPositions: (positions, _velocities, visibleFlags) => {
         this._renderer?.updateFromWorkerBuffers(positions, visibleFlags);
@@ -63,17 +66,22 @@ export class DsoLayer implements Layer {
       onTrail: (dsoId, positions) => callbacks.onDsoTrail(dsoId, positions),
     });
 
+    // Seed from the CURRENT store immediately: a remount / HMR / late DSO
+    // bootstrap may have already populated dsoObjects before this layer
+    // activated, in which case the change-only subscription would never fire and
+    // the renderer would stay empty. (The worker self-seeds ids + snapshots from
+    // the store in its own constructor, so only the renderer needs seeding here.)
+    const initialDsoObjects = useStore.getState().dsoObjects;
+    if (initialDsoObjects.length > 0) {
+      this.syncCatalog(initialDsoObjects);
+    }
+
     // Re-init DSO geometry whenever the catalog changes; initDsoClient() fills it.
     let prevDsoObjects = useStore.getState().dsoObjects;
     this.dsoUnsub = useStore.subscribe((state) => {
       if (state.dsoObjects === prevDsoObjects) return;
       prevDsoObjects = state.dsoObjects;
-      this._renderer?.init(state.dsoObjects, callbacks.getTleCount());
-      if (this._renderer) {
-        callbacks.onDsoGeometry(this._renderer.geometry, state.dsoObjects.length);
-      }
-      this.client?.syncIds(state.dsoObjects.map((dso) => dso.dsoId));
-      if (state.showOrbitTrail) callbacks.onRefreshTrail();
+      this.syncCatalog(state.dsoObjects);
     });
 
     let prevDsoEphemeris = useStore.getState().dsoEphemerisById;
@@ -85,6 +93,15 @@ export class DsoLayer implements Layer {
         this.client?.requestTrail(state.selectedDso.dsoId);
       }
     });
+  }
+
+  /** Rebuild DSO geometry + picker registration + worker ids for a catalog. */
+  private syncCatalog(dsoObjects: DsoObject[]): void {
+    if (!this._renderer || !this.callbacks) return;
+    this._renderer.init(dsoObjects, this.callbacks.getTleCount());
+    this.callbacks.onDsoGeometry(this._renderer.geometry, dsoObjects.length);
+    this.client?.syncIds(dsoObjects.map((dso) => dso.dsoId));
+    if (useStore.getState().showOrbitTrail) this.callbacks.onRefreshTrail();
   }
 
   update(frame: FrameContext): void {
@@ -142,6 +159,7 @@ export class DsoLayer implements Layer {
     this.client = null;
     this._renderer?.dispose();
     this._renderer = null;
+    this.callbacks = null;
     this.camera = null;
     this.canvas = null;
   }

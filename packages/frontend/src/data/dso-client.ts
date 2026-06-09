@@ -25,6 +25,10 @@ const cachedEphemeris = new Map<string, DsoSnapshot>();
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollIntervalMs = MANIFEST_POLL_MS;
+// Bumped by stopDsoClient(); lets an in-flight initDsoClient() detect that the
+// session was torn down (Engine disposed / StrictMode remount) while it was
+// awaiting fetches, so it won't write the store or restart polling afterward.
+let generation = 0;
 
 function catalogEntryToDsoObject(entry: DsoCatalogEntry): DsoObject {
   return {
@@ -165,7 +169,9 @@ async function pollManifest(): Promise<void> {
  * TLE loading is complete (or in parallel).
  */
 export async function initDsoClient(): Promise<void> {
+  const myGen = generation;
   const catalog = await fetchCatalog();
+  if (generation !== myGen) return; // torn down during fetch — abort
   if (!catalog || catalog.objects.length === 0) {
     console.log('DSO: no catalog available yet, will retry on next poll');
     pollIntervalMs = CATALOG_BOOTSTRAP_POLL_MS;
@@ -182,6 +188,7 @@ export async function initDsoClient(): Promise<void> {
   store.setDsoObjects(dsoObjects);
 
   await loadAllEphemeris(catalog.objects);
+  if (generation !== myGen) return; // torn down during ephemeris load — abort
   pollIntervalMs = MANIFEST_POLL_MS;
   startPolling();
 }
@@ -216,6 +223,7 @@ function startPolling(): void {
 }
 
 export function stopDsoClient(): void {
+  generation++; // invalidate any in-flight initDsoClient()
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
