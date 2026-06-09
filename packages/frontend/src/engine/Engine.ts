@@ -12,10 +12,9 @@ import { fetchTleCatalog, VisualListPoller } from '../data/tle-client';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
 import type { EnrichedTLEObject } from '../data/types';
-import { useStore, type TrackingStyle } from '../store/useStore';
+import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { OrbitTrailRenderer } from './OrbitTrailRenderer';
-import { CameraController, HOME_POSITION, HOME_TARGET } from './CameraController';
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
@@ -24,10 +23,10 @@ import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
 import { Renderer } from './render/Renderer';
 import { Camera } from './render/Camera';
+import { NavigationController } from './controllers/NavigationController';
+import type { TrackingSource } from './controllers/TrackingSource';
 
 const EARTH_RADIUS_KM = 6371;
-const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
-const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 export class Engine {
   private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
@@ -49,25 +48,15 @@ export class Engine {
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
   private inputManager: InputManager | null = null;
-  private dragExitedFollowingFromInput = false;
   private orbitTrailRenderer: OrbitTrailRenderer;
-  private cameraController: CameraController;
-  private arrivalTime = -1; // performance.now() when camera arrived; -1 = none
-  private cameraModeUnsub: (() => void) | null = null;
+  private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
   private dsoUnsub: (() => void) | null = null;
   private dsoEphemerisUnsub: (() => void) | null = null;
   private devValidation: DevValidation | null = null;
-  private returnEndPos: THREE.Vector3 | null = null;
-  private returnEndTarget: THREE.Vector3 = new THREE.Vector3(0, 0, 0);
-  private useHardReset = false;
   private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
-  private readonly trackingRadialDir = new THREE.Vector3();
-  private readonly trackingEndCamPos = new THREE.Vector3();
-  private readonly joyrideEntryTarget = new THREE.Vector3();
-  private readonly trackingVelocity = new THREE.Vector3();
   private lastSimTimeUpdateAt = 0;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -103,62 +92,13 @@ export class Engine {
     // ── Orbit trail ─────────────────────────────────────────────────────────
     this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
 
-    // ── Camera controller ────────────────────────────────────────────────────
-    this.cameraController = new CameraController(this.camera);
-
-    // Centralized camera mode transitions
-    let prevCameraMode = useStore.getState().cameraMode;
-    this.cameraModeUnsub = useStore.subscribe((state) => {
-      if (state.cameraMode === prevCameraMode) return;
-      prevCameraMode = state.cameraMode;
-
-      // Any transition to 'free': cancel animation, re-enable controls
-      if (state.cameraMode === 'free') {
-        this.cameraController.cancel();
-        this.cameraController.resetJoyrideState();
-        this.controls.enabled = true;
-        this.inputManager?.cancelJoyrideLook();
-        this.arrivalTime = -1;
-
-        if (this.dragExitedFollowingFromInput) {
-          this.dragExitedFollowingFromInput = false;
-        } else if (this.returnEndPos) {
-          this.controls.target.set(0, 0, 0);
-          this.returnEndPos = null;
-        }
-      }
-
-      // Entering 'returning': disable controls and start return animation
-      if (state.cameraMode === 'returning') {
-        this.cameraController.cancel();
-        this.cameraController.resetJoyrideState();
-        this.controls.enabled = false;
-        this.inputManager?.cancelJoyrideLook();
-        this.arrivalTime = -1;
-
-        this.cameraController.returnToHome(this.controls.target);
-
-        if (this.useHardReset) {
-          this.returnEndPos = HOME_POSITION.clone();
-          this.returnEndTarget.copy(HOME_TARGET);
-          this.useHardReset = false;
-        } else {
-          const dir = this.camera.position.clone().normalize();
-          const currentDistance = this.camera.position.length();
-          const targetDist = Math.max(currentDistance, HOME_POSITION.length());
-          this.returnEndPos = dir.multiplyScalar(targetDist);
-          this.returnEndTarget.set(0, 0, 0);
-        }
-      }
-
-      if (state.cameraMode === 'flying') {
-        this.controls.enabled = false;
-      }
-
-      if (state.cameraMode === 'following') {
-        this.controls.enabled = false;
-      }
-    });
+    // ── Navigation (camera state machine) ──────────────────────────────────────
+    this.nav = new NavigationController(
+      this.camera,
+      this.controls,
+      this.createTrackingSource(),
+      { onCancelJoyrideLook: () => this.inputManager?.cancelJoyrideLook() },
+    );
 
     // ── Clock ─────────────────────────────────────────────────────────────────
     this.clock = new THREE.Clock();
@@ -175,14 +115,14 @@ export class Engine {
         controls: this.controls,
       },
       {
-        onSelectTle: (index) => this.selectByIndex(index),
-        onSelectDso: (dsoIndex) => this.selectDsoByIndex(dsoIndex),
+        onSelectTle: (index) => this.nav.selectByIndex(index),
+        onSelectDso: (dsoIndex) => this.nav.selectDsoByIndex(dsoIndex),
         onDeselect: () => {
           useStore.getState().setSelectedSatellite(null, null);
           useStore.getState().setSelectedDso(null);
         },
-        onDragExitFollow: () => { this.dragExitedFollowingFromInput = true; },
-        onJoyrideLookInput: (dx, dy) => this.cameraController.addJoyrideLookInput(dx, dy),
+        onDragExitFollow: () => this.nav.notifyDragExitedFollowing(),
+        onJoyrideLookInput: (dx, dy) => this.nav.addJoyrideLookInput(dx, dy),
       },
     );
 
@@ -225,12 +165,12 @@ export class Engine {
       this.inputManager?.setCatalogData(catalogData);
 
       useStore.getState().setCatalogData(catalogData);
-      useStore.getState().setSelectByIndex((index: number) => this.selectByIndex(index));
-      useStore.getState().setTriggerFlyTo((index: number) => this.flyToSatellite(index));
-      useStore.getState().setTriggerJoyride((index: number) => this.joyrideSatellite(index));
-      useStore.getState().setTriggerResetCamera(() => this.resetCamera());
-      useStore.getState().setTriggerFlyToDso((dsoId: string) => this.flyToDso(dsoId));
-      useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.joyrideDso(dsoId));
+      useStore.getState().setSelectByIndex((index: number) => this.nav.selectByIndex(index));
+      useStore.getState().setTriggerFlyTo((index: number) => this.nav.flyToSatellite(index));
+      useStore.getState().setTriggerJoyride((index: number) => this.nav.joyrideSatellite(index));
+      useStore.getState().setTriggerResetCamera(() => this.nav.resetCamera());
+      useStore.getState().setTriggerFlyToDso((dsoId: string) => this.nav.flyToDso(dsoId));
+      useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.nav.joyrideDso(dsoId));
       useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
 
       this.satelliteRenderer.initFromCatalog(catalogData);
@@ -329,9 +269,9 @@ export class Engine {
             state.observerLocation &&
             (modeChanged || obsLocChanged)
           ) {
-            this.focusCameraOnObserverSky(state.observerLocation);
+            this.nav.focusCameraOnObserverSky(state.observerLocation);
           } else if (modeChanged && prevMode === 'visual' && state.visibilityMode !== 'visual') {
-            this.resetCamera();
+            this.nav.resetCamera();
           }
 
           if (state.showOrbitTrail && (modeChanged || obsLocChanged)) {
@@ -474,37 +414,39 @@ export class Engine {
     }
   }
 
-  private focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
-    const { observerWorldPos, upDir } = this.getObserverSkyAnchor(loc);
-    const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
-    const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
-
-    const store = useStore.getState();
-    if (store.cameraMode !== 'free') {
-      store.setCameraMode('free');
-    }
-
-    this.cameraController.cancel();
-    this.arrivalTime = -1;
-    this.returnEndPos = null;
-    this.controls.enabled = true;
-    this.camera.position.copy(camPos);
-    this.controls.target.copy(lookTarget);
-    this.camera.lookAt(lookTarget);
-    this.controls.update();
-  }
-
-  private getObserverSkyAnchor(
-    loc: { lat: number; lon: number; alt: number },
-  ): { observerWorldPos: THREE.Vector3; upDir: THREE.Vector3 } {
-    const observerWorldPos = getObserverScenePosition(
-      loc.lat,
-      loc.lon,
-      loc.alt,
-      simClock.date(),
-    );
-    const upDir = observerWorldPos.clone().normalize();
-    return { observerWorldPos, upDir };
+  /**
+   * Build the {@link TrackingSource} adapter the NavigationController reads through.
+   * This is the only place that bridges the camera to the renderers + worker clients,
+   * keeping the controller itself free of those imports. Uses live field reads +
+   * optional chaining so it's valid before the workers exist (created in initWorker).
+   */
+  private createTrackingSource(): TrackingSource {
+    return {
+      isReady: () => this.firstPositionReceived,
+      getTleCount: () => this.catalogData.length,
+      getTleObject: (index) => this.catalogData[index],
+      getTleAltitudeKm: (index) => {
+        const posArr = this.satelliteRenderer.mesh.geometry.getAttribute('currentPosition');
+        const x = posArr.getX(index);
+        const y = posArr.getY(index);
+        const z = posArr.getZ(index);
+        const magnitude = Math.sqrt(x * x + y * y + z * z);
+        return (magnitude * EARTH_RADIUS_KM) - EARTH_RADIUS_KM;
+      },
+      getInterpolationFactor: () => this.satelliteRenderer.material.uniforms.uT.value as number,
+      getTleKinematics: (index, uT, outPos, outVel) => {
+        if (index < 0 || index >= this.catalogData.length) return false;
+        outPos.copy(this.satelliteRenderer.getInterpolatedPosition(index, uT));
+        this.sgp4Client?.getInterpolatedVelocity(index, uT, outVel);
+        return true;
+      },
+      getDsoKinematics: (dsoIndex, outPos, outVel) => {
+        if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return false;
+        outPos.copy(this.dsoRenderer.getPositionAt(dsoIndex));
+        this.dsoClient?.getDsoVelocity(dsoIndex, outVel);
+        return true;
+      },
+    };
   }
 
   private getVisualNoradIds(): Set<number> {
@@ -623,111 +565,12 @@ export class Engine {
     const selectedIdx = store.selectedIndex;
     const selectedDso = store.selectedDso;
 
-    if (cameraMode === 'free') {
-      // Observer sky camera (visual mode): keep camera pinned to geolocation
-      // and facing up, so the view remains correct as Earth rotates.
-      if (store.visibilityMode === 'visual' && store.observerLocation) {
-        const { observerWorldPos, upDir } = this.getObserverSkyAnchor(store.observerLocation);
-        const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
-        const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
-        this.camera.position.copy(camPos);
-        this.controls.target.copy(lookTarget);
-        this.camera.lookAt(lookTarget);
-      } else {
-        this.controls.update();
-      }
-
-    } else if (cameraMode === 'flying' && selectedIdx !== null) {
-      // TLE fly-to
-      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      let endCamPos: THREE.Vector3;
-      let endTarget: THREE.Vector3;
-      if (trackingStyle === 'joyride') {
-        this.sgp4Client!.getInterpolatedVelocity(selectedIdx, uT, this.trackingVelocity);
-        endCamPos = satPos;
-        this.cameraController.getJoyrideEntryTarget(satPos, this.trackingVelocity, this.joyrideEntryTarget);
-        endTarget = this.joyrideEntryTarget;
-      } else {
-        this.trackingRadialDir.copy(satPos).normalize();
-        this.trackingEndCamPos.copy(satPos).addScaledVector(
-          this.trackingRadialDir,
-          this.cameraController.followOffsetDist,
-        );
-        endCamPos = this.trackingEndCamPos;
-        endTarget = satPos;
-      }
-      const done = this.cameraController.updateAnim(endCamPos, endTarget, this.controls.target);
-      if (done) {
-        store.setCameraMode('following');
-        this.arrivalTime = performance.now();
-      }
-
-    } else if (cameraMode === 'flying' && selectedDso !== null) {
-      // DSO fly-to
-      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
-      if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
-        const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
-        let endCamPos: THREE.Vector3;
-        let endTarget: THREE.Vector3;
-        if (trackingStyle === 'joyride') {
-          this.dsoClient!.getDsoVelocity(dsoIndex, this.trackingVelocity);
-          endCamPos = dsoPos;
-          this.cameraController.getJoyrideEntryTarget(dsoPos, this.trackingVelocity, this.joyrideEntryTarget);
-          endTarget = this.joyrideEntryTarget;
-        } else {
-          this.trackingRadialDir.copy(dsoPos).normalize();
-          this.trackingEndCamPos.copy(dsoPos).addScaledVector(
-            this.trackingRadialDir,
-            this.cameraController.followOffsetDist,
-          );
-          endCamPos = this.trackingEndCamPos;
-          endTarget = dsoPos;
-        }
-        const done = this.cameraController.updateAnim(endCamPos, endTarget, this.controls.target);
-        if (done) {
-          store.setCameraMode('following');
-          this.arrivalTime = performance.now();
-        }
-      } else {
-        // No ephemeris yet — stay in free until data arrives
-        store.setCameraMode('free');
-      }
-
-    } else if (cameraMode === 'following' && selectedIdx !== null) {
-      // TLE follow
-      const satPos = this.satelliteRenderer.getInterpolatedPosition(selectedIdx, uT);
-      if (trackingStyle === 'joyride') {
-        this.sgp4Client!.getInterpolatedVelocity(selectedIdx, uT, this.trackingVelocity);
-        this.cameraController.updateJoyride(satPos, this.trackingVelocity, this.controls.target);
-      } else {
-        this.cameraController.updateFollow(satPos, this.controls.target);
-      }
-
-    } else if (cameraMode === 'following' && selectedDso !== null) {
-      // DSO follow
-      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
-      if (dsoIndex >= 0 && this.dsoRenderer.isVisible(dsoIndex)) {
-        const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
-        if (trackingStyle === 'joyride') {
-          this.dsoClient!.getDsoVelocity(dsoIndex, this.trackingVelocity);
-          this.cameraController.updateJoyride(dsoPos, this.trackingVelocity, this.controls.target);
-        } else {
-          this.cameraController.updateFollow(dsoPos, this.controls.target);
-        }
-      }
-
-    } else if (cameraMode === 'returning') {
-      const done = this.cameraController.updateAnim(
-        this.returnEndPos || HOME_POSITION, this.returnEndTarget, this.controls.target,
-      );
-      if (done) {
-        store.setCameraMode('free');
-      }
-    }
+    this.nav.update(uT);
 
     // ── TLE selection shader uniforms ─────────────────────────────────────────
-    const timeSinceArrival = this.arrivalTime > 0
-      ? (performance.now() - this.arrivalTime) / 1000
+    const arrivalTime = this.nav.getArrivalTime();
+    const timeSinceArrival = arrivalTime > 0
+      ? (performance.now() - arrivalTime) / 1000
       : -1.0;
     this.satelliteRenderer.updateSelectedUniforms(
       selectedIdx !== null ? selectedIdx : -1,
@@ -750,129 +593,6 @@ export class Engine {
     this.orbitTrailRenderer.setJoyrideMode(cameraMode === 'following' && trackingStyle === 'joyride');
     this.renderer.render(this.scene, this.camera);
   };
-
-  selectByIndex(index: number): void {
-    if (index < 0 || index >= this.catalogData.length) return;
-
-    const posArr = this.satelliteRenderer.mesh.geometry.getAttribute('currentPosition');
-    const x = posArr.getX(index);
-    const y = posArr.getY(index);
-    const z = posArr.getZ(index);
-    const magnitude = Math.sqrt(x * x + y * y + z * z);
-    const altitudeKm = (magnitude * EARTH_RADIUS_KM) - EARTH_RADIUS_KM;
-
-    const store = useStore.getState();
-
-    const isTracking = store.cameraMode === 'flying' || store.cameraMode === 'following';
-    if (isTracking && store.selectedIndex !== null && store.selectedIndex !== index) {
-      store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
-      const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
-      const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
-      if (store.trackingStyle === 'joyride') {
-        this.cameraController.resetJoyrideState();
-      }
-      this.arrivalTime = -1;
-      this.cameraController.flyTo(satPos, this.controls.target);
-      store.setCameraMode('flying');
-      return;
-    }
-
-    if (store.cameraMode !== 'free' && store.selectedIndex !== index) {
-      store.setCameraMode('free');
-    }
-
-    store.setSelectedSatellite(index, this.catalogData[index], Math.round(altitudeKm));
-  }
-
-  selectDsoByIndex(dsoIndex: number): void {
-    const store = useStore.getState();
-    const dso = store.dsoObjects[dsoIndex];
-    if (!dso) return;
-
-    if (store.cameraMode !== 'free') {
-      store.setCameraMode('free');
-    }
-
-    store.setSelectedDso(dso);
-  }
-
-  flyToSatellite(index: number, style: TrackingStyle = 'follow'): void {
-    if (index < 0 || index >= this.catalogData.length || !this.firstPositionReceived) return;
-
-    let store = useStore.getState();
-    if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
-      && store.selectedIndex === index
-      && store.trackingStyle === style) return;
-
-    if (store.selectedIndex !== index) {
-      this.selectByIndex(index);
-    }
-
-    store = useStore.getState();
-    if (store.selectedIndex !== index) return;
-    if (store.trackingStyle !== style) {
-      store.setTrackingStyle(style);
-    }
-
-    const uT = this.satelliteRenderer.material.uniforms.uT.value as number;
-    const satPos = this.satelliteRenderer.getInterpolatedPosition(index, uT);
-
-    if (style === 'joyride') {
-      this.cameraController.resetJoyrideState();
-    }
-    this.arrivalTime = -1;
-    this.cameraController.flyTo(satPos, this.controls.target);
-    store.setCameraMode('flying');
-  }
-
-  joyrideSatellite(index: number): void {
-    this.flyToSatellite(index, 'joyride');
-  }
-
-  flyToDso(dsoId: string, style: TrackingStyle = 'follow'): void {
-    let store = useStore.getState();
-    const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === dsoId);
-    if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return;
-
-    if ((store.cameraMode === 'flying' || store.cameraMode === 'following')
-      && store.selectedDso?.dsoId === dsoId
-      && store.trackingStyle === style) return;
-
-    if (store.selectedDso?.dsoId !== dsoId) {
-      store.setSelectedDso(store.dsoObjects[dsoIndex]);
-    }
-
-    store = useStore.getState();
-    if (store.selectedDso?.dsoId !== dsoId) return;
-    if (store.trackingStyle !== style) {
-      store.setTrackingStyle(style);
-    }
-
-    const dsoPos = this.dsoRenderer.getPositionAt(dsoIndex);
-    if (style === 'joyride') {
-      this.cameraController.resetJoyrideState();
-    }
-    this.arrivalTime = -1;
-    this.cameraController.flyTo(dsoPos, this.controls.target);
-    store.setCameraMode('flying');
-  }
-
-  joyrideDso(dsoId: string): void {
-    this.flyToDso(dsoId, 'joyride');
-  }
-
-  resetCamera(): void {
-    const store = useStore.getState();
-    this.useHardReset = true;
-    if (store.cameraMode !== 'returning') {
-      store.setCameraMode('returning');
-    } else {
-      this.returnEndPos = HOME_POSITION.clone();
-      this.returnEndTarget.copy(HOME_TARGET);
-      this.cameraController.returnToHome(this.controls.target);
-      this.useHardReset = false;
-    }
-  }
 
   private updateObserverMarker(loc: { lat: number; lon: number; alt: number } | null): void {
     if (loc) {
@@ -949,7 +669,7 @@ export class Engine {
     }
     this.sgp4Client?.dispose();
     this.visualListPoller?.dispose();
-    this.cameraModeUnsub?.();
+    this.nav.dispose();
     this.filterUnsub?.();
     this.trailUnsub?.();
     this.dsoUnsub?.();
