@@ -13,7 +13,6 @@ import { DsoRenderer } from './DsoRenderer';
 import type { EnrichedTLEObject } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
-import { OrbitTrailRenderer } from './OrbitTrailRenderer';
 import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
@@ -27,6 +26,7 @@ import type { TrackingSource } from './controllers/TrackingSource';
 import { World } from './world/World';
 import { StarfieldLayer } from './world/layers/StarfieldLayer';
 import { EarthLayer } from './world/layers/EarthLayer';
+import { TrailsLayer } from './world/layers/TrailsLayer';
 import type { FrameContext } from './render/Layer';
 
 const EARTH_RADIUS_KM = 6371;
@@ -51,7 +51,7 @@ export class Engine {
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
   private inputManager: InputManager | null = null;
-  private orbitTrailRenderer: OrbitTrailRenderer;
+  private trailsLayer: TrailsLayer;
   private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
@@ -82,6 +82,7 @@ export class Engine {
     // Migrating subsystems into layers one at a time (Slice 5).
     const maxAnisotropy = this.renderer.getMaxAnisotropy();
     this.earthLayer = new EarthLayer();
+    this.trailsLayer = new TrailsLayer();
     this.world = new World({
       onCriticalError: (err) =>
         useStore.getState().setLoadingError(
@@ -90,6 +91,7 @@ export class Engine {
     });
     this.world.register(this.earthLayer);
     this.world.register(new StarfieldLayer());
+    this.world.register(this.trailsLayer);
     void this.world.init({
       scene: this.scene,
       camera: this.camera,
@@ -102,9 +104,6 @@ export class Engine {
 
     // ── DSO renderer (always present, inited later when catalog arrives) ─────
     this.dsoRenderer = new DsoRenderer(this.scene);
-
-    // ── Orbit trail ─────────────────────────────────────────────────────────
-    this.orbitTrailRenderer = new OrbitTrailRenderer(this.scene);
 
     // ── Navigation (camera state machine) ──────────────────────────────────────
     this.nav = new NavigationController(
@@ -209,7 +208,7 @@ export class Engine {
           // Gate: only apply if trail is active and this DSO is selected
           const state = useStore.getState();
           if (!state.showOrbitTrail || state.selectedDso?.dsoId !== dsoId) return;
-          this.orbitTrailRenderer.generateFromPositions(positions);
+          this.trailsLayer.generateFromPositions(positions);
         },
       });
 
@@ -497,14 +496,14 @@ export class Engine {
     state: ReturnType<typeof useStore.getState> = useStore.getState(),
   ): void {
     if (!state.showOrbitTrail) {
-      this.orbitTrailRenderer.clear();
+      this.trailsLayer.clear();
       return;
     }
 
     const selectedIndex = state.selectedIndex;
     if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
       const sat = this.catalogData[selectedIndex];
-      this.orbitTrailRenderer.generate(
+      this.trailsLayer.generate(
         sat.line1,
         sat.line2,
         this.sgp4Client?.getCurrentPropagationTimestampMs() ?? simClock.now(),
@@ -517,7 +516,7 @@ export class Engine {
       return;
     }
 
-    this.orbitTrailRenderer.clear();
+    this.trailsLayer.clear();
   }
 
   /** Called by store actions on rate change, jumpTo, or reset. */
@@ -588,8 +587,6 @@ export class Engine {
     useStore.getState().setDsoLabelPositions(labelPositions);
 
     // ── Camera mode handling ─────────────────────────────────────────────────
-    const cameraMode = store.cameraMode;
-    const trackingStyle = store.trackingStyle;
     const selectedIdx = store.selectedIndex;
     const selectedDso = store.selectedDso;
 
@@ -617,7 +614,6 @@ export class Engine {
       this.camera.position.length(),
       this.renderer.getPixelRatio(),
     );
-    this.orbitTrailRenderer.setJoyrideMode(cameraMode === 'following' && trackingStyle === 'joyride');
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -718,7 +714,6 @@ export class Engine {
     }
     this.gpuPicker?.dispose();
     this.dsoRenderer.dispose();
-    this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.world.dispose();
     this.cameraRig.dispose();
