@@ -36,6 +36,8 @@ export interface FrameContext {
   sunDirectionECI: THREE.Vector3;
   /** Greenwich Apparent Sidereal Time, radians — Earth's `rotation.y`. */
   gastRadians: number;
+  /** Camera is following a target in first-person joyride style (trail dims). */
+  isJoyrideTracking: boolean;
 }
 
 export interface Layer {

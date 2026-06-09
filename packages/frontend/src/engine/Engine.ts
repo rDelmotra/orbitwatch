@@ -9,15 +9,12 @@ import {
 import { VisualListPoller } from '../data/tle-client';
 import { bootstrapCatalog } from '../data/bootstrapCatalog';
 import { SatelliteRenderer } from './SatelliteRenderer';
-import { DsoRenderer } from './DsoRenderer';
 import type { EnrichedTLEObject } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { DevValidation } from './DevValidation';
-import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
 import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
-import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
 import { Renderer } from './render/Renderer';
 import { Camera } from './render/Camera';
@@ -27,6 +24,7 @@ import { World } from './world/World';
 import { StarfieldLayer } from './world/layers/StarfieldLayer';
 import { EarthLayer } from './world/layers/EarthLayer';
 import { TrailsLayer } from './world/layers/TrailsLayer';
+import { DsoLayer } from './world/layers/DsoLayer';
 import type { FrameContext } from './render/Layer';
 
 const EARTH_RADIUS_KM = 6371;
@@ -44,9 +42,8 @@ export class Engine {
   private world: World;
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
-  private dsoRenderer: DsoRenderer;
+  private dsoLayer: DsoLayer;
   private sgp4Client: Sgp4WorkerClient | null = null;
-  private dsoClient: DsoWorkerClient | null = null;
   private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -55,8 +52,6 @@ export class Engine {
   private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
-  private dsoUnsub: (() => void) | null = null;
-  private dsoEphemerisUnsub: (() => void) | null = null;
   private devValidation: DevValidation | null = null;
   private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
@@ -83,6 +78,7 @@ export class Engine {
     const maxAnisotropy = this.renderer.getMaxAnisotropy();
     this.earthLayer = new EarthLayer();
     this.trailsLayer = new TrailsLayer();
+    this.dsoLayer = new DsoLayer();
     this.world = new World({
       onCriticalError: (err) =>
         useStore.getState().setLoadingError(
@@ -92,7 +88,10 @@ export class Engine {
     this.world.register(this.earthLayer);
     this.world.register(new StarfieldLayer());
     this.world.register(this.trailsLayer);
-    void this.world.init({
+    this.world.register(this.dsoLayer);
+    // Synchronous layers (all current ones) fully init in this call, so their
+    // renderers are ready for InputManager / TrackingSource below.
+    this.world.init({
       scene: this.scene,
       camera: this.camera,
       renderer: this.renderer.instance,
@@ -101,9 +100,6 @@ export class Engine {
 
     // ── Satellites ───────────────────────────────────────────────────────────
     this.satelliteRenderer = new SatelliteRenderer(this.scene);
-
-    // ── DSO renderer (always present, inited later when catalog arrives) ─────
-    this.dsoRenderer = new DsoRenderer(this.scene);
 
     // ── Navigation (camera state machine) ──────────────────────────────────────
     this.nav = new NavigationController(
@@ -124,7 +120,7 @@ export class Engine {
       {
         canvas,
         satelliteRenderer: this.satelliteRenderer,
-        dsoRenderer: this.dsoRenderer,
+        dsoRenderer: this.dsoLayer.renderer,
         controls: this.controls,
       },
       {
@@ -200,48 +196,20 @@ export class Engine {
         this.satelliteRenderer.setSatelliteSize(issIndex, 2.0);
       }
 
-      this.dsoClient = new DsoWorkerClient({
-        onPositions: (positions, _velocities, visibleFlags) => {
-          this.dsoRenderer.updateFromWorkerBuffers(positions, visibleFlags);
-        },
-        onTrail: (dsoId, positions) => {
+      // ── DSO layer activation (worker client + subscriptions) ─────────────────
+      this.dsoLayer.activate({
+        onDsoTrail: (dsoId, positions) => {
           // Gate: only apply if trail is active and this DSO is selected
           const state = useStore.getState();
           if (!state.showOrbitTrail || state.selectedDso?.dsoId !== dsoId) return;
-          this.trailsLayer.generateFromPositions(positions);
+          this.world.runLayerCommand(this.trailsLayer, 'generateFromPositions', () =>
+            this.trailsLayer.generateFromPositions(positions),
+          );
         },
+        onDsoGeometry: (geometry, count) => this.gpuPicker?.addDsoGeometry(geometry, count),
+        onRefreshTrail: () => this.refreshOrbitTrail(),
+        getTleCount: () => this.catalogData.length,
       });
-
-      // ── DSO catalog subscription ────────────────────────────────────────────
-      // Re-init DSO renderer whenever dsoObjects changes in the store.
-      // initDsoClient() runs in parallel and writes to the store when ready.
-      let prevDsoObjects = useStore.getState().dsoObjects;
-      this.dsoUnsub = useStore.subscribe((state) => {
-        if (state.dsoObjects !== prevDsoObjects) {
-          prevDsoObjects = state.dsoObjects;
-          this.dsoRenderer.init(state.dsoObjects, this.catalogData.length);
-          this.gpuPicker?.addDsoGeometry(this.dsoRenderer.geometry, state.dsoObjects.length);
-          this.dsoClient?.syncIds(state.dsoObjects.map((dso) => dso.dsoId));
-          if (state.showOrbitTrail) {
-            this.refreshOrbitTrail(state);
-          }
-        }
-      });
-      let prevDsoEphemeris = useStore.getState().dsoEphemerisById;
-      this.dsoEphemerisUnsub = useStore.subscribe((state) => {
-        if (state.dsoEphemerisById !== prevDsoEphemeris) {
-          this.dsoClient?.syncEphemerisDiff(prevDsoEphemeris, state.dsoEphemerisById);
-          prevDsoEphemeris = state.dsoEphemerisById;
-          if (state.showOrbitTrail && state.selectedDso) {
-            this.dsoClient?.requestTrail(state.selectedDso.dsoId);
-          }
-        }
-      });
-
-      // Start DSO pipeline in parallel — non-blocking
-      initDsoClient().catch((err) =>
-        console.warn('DSO client init error:', err),
-      );
 
       // ── TLE filters subscription ────────────────────────────────────────────
       let prevCatFilters = useStore.getState().categoryFilters;
@@ -451,16 +419,8 @@ export class Engine {
         }
         return true;
       },
-      getDsoKinematics: (dsoIndex, outPos, outVel) => {
-        if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return false;
-        outPos.copy(this.dsoRenderer.getPositionAt(dsoIndex));
-        if (this.dsoClient) {
-          this.dsoClient.getDsoVelocity(dsoIndex, outVel);
-        } else {
-          outVel.set(0, 0, 0);
-        }
-        return true;
-      },
+      getDsoKinematics: (dsoIndex, outPos, outVel) =>
+        this.dsoLayer.getDsoKinematics(dsoIndex, outPos, outVel),
     };
   }
 
@@ -496,27 +456,26 @@ export class Engine {
     state: ReturnType<typeof useStore.getState> = useStore.getState(),
   ): void {
     if (!state.showOrbitTrail) {
-      this.trailsLayer.clear();
+      this.world.runLayerCommand(this.trailsLayer, 'clear', () => this.trailsLayer.clear());
       return;
     }
 
     const selectedIndex = state.selectedIndex;
     if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
       const sat = this.catalogData[selectedIndex];
-      this.trailsLayer.generate(
-        sat.line1,
-        sat.line2,
-        this.sgp4Client?.getCurrentPropagationTimestampMs() ?? simClock.now(),
+      const anchorMs = this.sgp4Client?.getCurrentPropagationTimestampMs() ?? simClock.now();
+      this.world.runLayerCommand(this.trailsLayer, 'generate', () =>
+        this.trailsLayer.generate(sat.line1, sat.line2, anchorMs),
       );
       return;
     }
 
     if (state.selectedDso) {
-      this.dsoClient?.requestTrail(state.selectedDso.dsoId);
+      this.dsoLayer.requestTrail(state.selectedDso.dsoId);
       return;
     }
 
-    this.trailsLayer.clear();
+    this.world.runLayerCommand(this.trailsLayer, 'clear', () => this.trailsLayer.clear());
   }
 
   /** Called by store actions on rate change, jumpTo, or reset. */
@@ -526,7 +485,7 @@ export class Engine {
     this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
     // Immediate DSO tick at new sim-time
-    this.dsoClient?.triggerImmediateTick(simClock.now());
+    this.dsoLayer.triggerImmediateTick(simClock.now());
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());
@@ -551,6 +510,7 @@ export class Engine {
     this.satelliteRenderer.material.uniforms.uT.value = uT;
 
     // Per-frame context shared by all registered layers (Slice 5).
+    const navState = useStore.getState();
     const frame: FrameContext = {
       date: now,
       nowMs: simClock.now(),
@@ -560,14 +520,13 @@ export class Engine {
       cameraDistance: this.camera.position.length(),
       sunDirectionECI: sunDir,
       gastRadians: gast,
+      isJoyrideTracking:
+        navState.cameraMode === 'following' && navState.trackingStyle === 'joyride',
     };
     this.world.update(frame);
 
     this.devValidation?.tickFrame();
 
-    // ── DSO position update (worker-driven) ───────────────────────────────────
-    const store = useStore.getState();
-    this.dsoClient?.tick(simClock.now());
     // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
     const wallNow = performance.now();
     if (wallNow - this.lastSimTimeUpdateAt > 250) {
@@ -575,20 +534,8 @@ export class Engine {
       this.lastSimTimeUpdateAt = wallNow;
     }
 
-    this.dsoRenderer.updateUniforms(this.renderer.getPixelRatio());
-
-    // ── DSO label screen positions ────────────────────────────────────────────
-    const canvas = this.renderer.domElement;
-    const labelPositions = this.dsoRenderer.getScreenPositions(
-      this.camera,
-      canvas.clientWidth,
-      canvas.clientHeight,
-    );
-    useStore.getState().setDsoLabelPositions(labelPositions);
-
     // ── Camera mode handling ─────────────────────────────────────────────────
-    const selectedIdx = store.selectedIndex;
-    const selectedDso = store.selectedDso;
+    const selectedIdx = useStore.getState().selectedIndex;
 
     this.nav.update(uT);
 
@@ -601,14 +548,6 @@ export class Engine {
       selectedIdx !== null ? selectedIdx : -1,
       timeSinceArrival,
     );
-
-    // ── DSO selection shader uniform ──────────────────────────────────────────
-    if (selectedDso !== null) {
-      const dsoIndex = store.dsoObjects.findIndex((d) => d.dsoId === selectedDso.dsoId);
-      this.dsoRenderer.setSelectedDsoIndex(dsoIndex);
-    } else {
-      this.dsoRenderer.setSelectedDsoIndex(-1);
-    }
 
     this.satelliteRenderer.updateUniforms(
       this.camera.position.length(),
@@ -688,7 +627,6 @@ export class Engine {
   };
 
   dispose(): void {
-    stopDsoClient();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }
@@ -697,9 +635,6 @@ export class Engine {
     this.nav.dispose();
     this.filterUnsub?.();
     this.trailUnsub?.();
-    this.dsoUnsub?.();
-    this.dsoEphemerisUnsub?.();
-    this.dsoClient?.dispose();
     this.inputManager?.dispose();
     window.removeEventListener('resize', this.onResize);
     if (this.observerMarker) {
@@ -713,7 +648,6 @@ export class Engine {
       this.observerMarker = null;
     }
     this.gpuPicker?.dispose();
-    this.dsoRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.world.dispose();
     this.cameraRig.dispose();

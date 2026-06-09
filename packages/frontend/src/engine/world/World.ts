@@ -24,11 +24,27 @@ export class World {
     return this;
   }
 
-  async init(ctx: LayerContext): Promise<void> {
+  /**
+   * Initialize all layers. **Synchronous** layers complete (and become
+   * updatable) within this call, so the caller can rely on their products
+   * immediately. Asynchronous layers init in the background and are marked
+   * ready when they resolve — `update(frame)` skips them until then.
+   */
+  init(ctx: LayerContext): void {
     for (const layer of this.layers) {
       try {
-        await layer.init(ctx);
-        this.initialized.add(layer);
+        const result = layer.init(ctx);
+        if (result instanceof Promise) {
+          result
+            .then(() => {
+              this.initialized.add(layer);
+            })
+            .catch((err) => {
+              this.handleFailure(layer, err, 'init');
+            });
+        } else {
+          this.initialized.add(layer);
+        }
       } catch (err) {
         this.handleFailure(layer, err, 'init');
       }
@@ -44,6 +60,26 @@ export class World {
       } catch (err) {
         this.handleFailure(layer, err, 'update');
       }
+    }
+  }
+
+  /**
+   * Run a direct (command-style) call on a layer with the SAME failure isolation
+   * as `update()`: non-critical failures log + disable the layer; critical ones
+   * escalate. Also guards against commands arriving before the layer's init has
+   * resolved (returns + warns instead of silently dropping). Use this for any
+   * layer method the Engine calls outside the `update(frame)` path.
+   */
+  runLayerCommand(layer: Layer, label: string, fn: () => void): void {
+    if (this.failed.has(layer)) return;
+    if (!this.initialized.has(layer)) {
+      console.warn(`[world] command "${label}" on "${layer.name}" before init — ignored`);
+      return;
+    }
+    try {
+      fn();
+    } catch (err) {
+      this.handleFailure(layer, err, `command:${label}`);
     }
   }
 
@@ -65,7 +101,7 @@ export class World {
     this.failed.clear();
   }
 
-  private handleFailure(layer: Layer, err: unknown, phase: 'init' | 'update'): void {
+  private handleFailure(layer: Layer, err: unknown, phase: string): void {
     this.failed.add(layer);
     if (layer.critical) {
       console.error(`[world] CRITICAL layer "${layer.name}" failed at ${phase}:`, err);

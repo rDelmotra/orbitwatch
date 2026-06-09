@@ -1,5 +1,4 @@
 import { OrbitTrailRenderer } from '../../OrbitTrailRenderer';
-import { useStore } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 /**
@@ -18,10 +17,8 @@ export class TrailsLayer implements Layer {
     this.renderer = new OrbitTrailRenderer(ctx.scene);
   }
 
-  update(_frame: FrameContext): void {
-    if (!this.renderer) return;
-    const { cameraMode, trackingStyle } = useStore.getState();
-    this.renderer.setJoyrideMode(cameraMode === 'following' && trackingStyle === 'joyride');
+  update(frame: FrameContext): void {
+    this.renderer?.setJoyrideMode(frame.isJoyrideTracking);
   }
 
   // ── Engine-driven orchestration (selection / time-jump) ─────────────────────
