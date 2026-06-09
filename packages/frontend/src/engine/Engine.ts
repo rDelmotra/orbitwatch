@@ -165,13 +165,9 @@ export class Engine {
       });
       this.visualListPoller.start();
 
-      // One-time catalog bootstrap: fetch + store seed + renderer prime + GPU picker.
-      const { catalogData, tles, gpuPicker } = await bootstrapCatalog({
-        apiUrl,
-        renderer: this.renderer.instance,
-        camera: this.camera,
-        satelliteRenderer: this.satelliteRenderer,
-      });
+      // One-time catalog bootstrap — pure data (fetch + store seed). Renderer
+      // priming + GPU picker stay here on the render side (data/ never imports engine/).
+      const { catalogData, tles } = await bootstrapCatalog(apiUrl);
 
       this.catalogData = catalogData;
       this.inputManager?.setCatalogData(catalogData);
@@ -184,7 +180,14 @@ export class Engine {
       useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.nav.joyrideDso(dsoId));
       useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
 
-      this.gpuPicker = gpuPicker;
+      this.satelliteRenderer.initFromCatalog(catalogData);
+
+      this.gpuPicker = new GPUPicker(
+        this.renderer.instance,
+        this.camera,
+        this.satelliteRenderer,
+        catalogData.length,
+      );
       this.inputManager?.setGpuPicker(this.gpuPicker);
 
       if (import.meta.env.DEV) {
@@ -441,13 +444,22 @@ export class Engine {
       getTleKinematics: (index, uT, outPos, outVel) => {
         if (index < 0 || index >= this.catalogData.length) return false;
         outPos.copy(this.satelliteRenderer.getInterpolatedPosition(index, uT));
-        this.sgp4Client?.getInterpolatedVelocity(index, uT, outVel);
+        // Never leave outVel stale: zero it when the worker client isn't up yet.
+        if (this.sgp4Client) {
+          this.sgp4Client.getInterpolatedVelocity(index, uT, outVel);
+        } else {
+          outVel.set(0, 0, 0);
+        }
         return true;
       },
       getDsoKinematics: (dsoIndex, outPos, outVel) => {
         if (dsoIndex < 0 || !this.dsoRenderer.isVisible(dsoIndex)) return false;
         outPos.copy(this.dsoRenderer.getPositionAt(dsoIndex));
-        this.dsoClient?.getDsoVelocity(dsoIndex, outVel);
+        if (this.dsoClient) {
+          this.dsoClient.getDsoVelocity(dsoIndex, outVel);
+        } else {
+          outVel.set(0, 0, 0);
+        }
         return true;
       },
     };

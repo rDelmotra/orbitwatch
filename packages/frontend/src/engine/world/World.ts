@@ -11,6 +11,7 @@ import type { FrameContext, Layer, LayerContext } from '../render/Layer';
  */
 export class World {
   private readonly layers: Layer[] = [];
+  private readonly initialized = new Set<Layer>();
   private readonly failed = new Set<Layer>();
   private readonly onCriticalError: (err: unknown) => void;
 
@@ -27,6 +28,7 @@ export class World {
     for (const layer of this.layers) {
       try {
         await layer.init(ctx);
+        this.initialized.add(layer);
       } catch (err) {
         this.handleFailure(layer, err, 'init');
       }
@@ -35,7 +37,8 @@ export class World {
 
   update(frame: FrameContext): void {
     for (const layer of this.layers) {
-      if (this.failed.has(layer)) continue;
+      // Skip layers whose (possibly async) init hasn't completed, and failed ones.
+      if (!this.initialized.has(layer) || this.failed.has(layer)) continue;
       try {
         layer.update(frame);
       } catch (err) {
@@ -58,6 +61,7 @@ export class World {
       }
     }
     this.layers.length = 0;
+    this.initialized.clear();
     this.failed.clear();
   }
 

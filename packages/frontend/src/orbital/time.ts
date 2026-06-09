@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sourceToScene } from './frames';
 
 function toJulianDate(date: Date): number {
   return date.getTime() / 86400000.0 + 2440587.5;
@@ -73,7 +74,7 @@ export function getSunDirection(date: Date): THREE.Vector3 {
   const eciY = Math.sin(sunLon) * Math.cos(eps);
   const eciZ = Math.sin(sunLon) * Math.sin(eps);
 
-  // Map ECI → Three.js Y-up world space (no GAST rotation — Engine rotates the mesh)
-  // THREE.x = ECI.x,  THREE.y = ECI.z (north),  THREE.z = -ECI.y
-  return new THREE.Vector3(eciX, eciZ, -eciY).normalize();
+  // Map ECI → Three.js Y-up world space via the one shared swap (no GAST rotation —
+  // Engine rotates the mesh). frames.ts owns the axis convention.
+  return sourceToScene(eciX, eciY, eciZ).normalize();
 }

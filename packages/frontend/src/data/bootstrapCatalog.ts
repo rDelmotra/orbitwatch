@@ -1,36 +1,23 @@
-import type * as THREE from 'three';
 import type { EnrichedTLEObject, TLEInput } from './types';
 import { fetchTleCatalog } from './tle-client';
-import { GPUPicker } from '../engine/GPUPicker';
-import type { SatelliteRenderer } from '../engine/SatelliteRenderer';
 import { useStore } from '../store/useStore';
-
-export interface BootstrapCatalogDeps {
-  apiUrl: string;
-  renderer: THREE.WebGLRenderer;
-  camera: THREE.PerspectiveCamera;
-  satelliteRenderer: SatelliteRenderer;
-}
 
 export interface BootstrapCatalogResult {
   catalogData: EnrichedTLEObject[];
   tles: TLEInput[];
-  gpuPicker: GPUPicker;
 }
 
 /**
- * One-time catalog bootstrap: fetch the TLE catalog, seed the store with it,
- * prime the satellite renderer geometry, and build the GPU picker over it.
+ * One-time catalog bootstrap — pure data: fetch the TLE catalog and seed the
+ * store with it. Returns the catalog + parsed TLEs for the Engine to wire into
+ * the render layer (renderer priming + GPU picker stay in the Engine/render
+ * side, so `data/` never imports `engine/` — the dependency rule).
  *
- * This is deliberately a thin function — NOT a manager. It runs once during
- * Engine init and hands back the data + picker for the Engine to wire up.
- * Per-tick propagation, subscriptions, and command/trigger registration stay
- * in the Engine (and migrate to layers later); none of that belongs here.
+ * This is deliberately a thin function, NOT a manager. Per-tick propagation,
+ * subscriptions, and command/trigger registration stay in the Engine.
  */
-export async function bootstrapCatalog(
-  deps: BootstrapCatalogDeps,
-): Promise<BootstrapCatalogResult> {
-  const { catalogData, tles, categoryCounts, regimeCounts } = await fetchTleCatalog(deps.apiUrl);
+export async function bootstrapCatalog(apiUrl: string): Promise<BootstrapCatalogResult> {
+  const { catalogData, tles, categoryCounts, regimeCounts } = await fetchTleCatalog(apiUrl);
 
   const store = useStore.getState();
   store.setCatalogInfo({
@@ -40,15 +27,5 @@ export async function bootstrapCatalog(
   });
   store.setCatalogData(catalogData);
 
-  // GPU picker reads the satellite geometry, so the renderer must be primed first.
-  deps.satelliteRenderer.initFromCatalog(catalogData);
-
-  const gpuPicker = new GPUPicker(
-    deps.renderer,
-    deps.camera,
-    deps.satelliteRenderer,
-    catalogData.length,
-  );
-
-  return { catalogData, tles, gpuPicker };
+  return { catalogData, tles };
 }
