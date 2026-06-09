@@ -22,6 +22,7 @@ import { simClock } from './SimClock';
 import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
+import { Renderer } from './render/Renderer';
 
 const EARTH_RADIUS_KM = 6371;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
@@ -30,7 +31,7 @@ const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 export class Engine {
   private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
 
-  private renderer: THREE.WebGLRenderer;
+  private renderer: Renderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
@@ -69,12 +70,7 @@ export class Engine {
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer = new Renderer(canvas);
 
     // ── Scene ─────────────────────────────────────────────────────────────────
     this.scene = new THREE.Scene();
@@ -99,8 +95,8 @@ export class Engine {
     this.starfieldRenderer = new StarfieldRenderer();
     this.scene.add(this.starfieldRenderer.object);
 
-    const maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    this.earthRenderer = new EarthRenderer(maxAnisotropy, this.renderer, this.camera);
+    const maxAnisotropy = this.renderer.getMaxAnisotropy();
+    this.earthRenderer = new EarthRenderer(maxAnisotropy, this.renderer.instance, this.camera);
     this.scene.add(this.earthRenderer.object);
 
     // ── Satellites ───────────────────────────────────────────────────────────
@@ -245,7 +241,7 @@ export class Engine {
       this.satelliteRenderer.initFromCatalog(catalogData);
 
       this.gpuPicker = new GPUPicker(
-        this.renderer,
+        this.renderer.instance,
         this.camera,
         this.satelliteRenderer,
         catalogData.length,
@@ -949,7 +945,7 @@ export class Engine {
     const height = canvas.clientHeight;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height, false);
+    this.renderer.setSize(width, height);
   };
 
   dispose(): void {
