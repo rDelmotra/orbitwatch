@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EarthRenderer } from './EarthRenderer';
-import { StarfieldRenderer } from './StarfieldRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import {
@@ -26,6 +25,9 @@ import { Renderer } from './render/Renderer';
 import { Camera } from './render/Camera';
 import { NavigationController } from './controllers/NavigationController';
 import type { TrackingSource } from './controllers/TrackingSource';
+import { World } from './world/World';
+import { StarfieldLayer } from './world/layers/StarfieldLayer';
+import type { FrameContext } from './render/Layer';
 
 const EARTH_RADIUS_KM = 6371;
 
@@ -39,7 +41,7 @@ export class Engine {
   private controls: OrbitControls;
   private clock: THREE.Clock;
   private earthRenderer: EarthRenderer;
-  private starfieldRenderer: StarfieldRenderer;
+  private world: World;
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
   private dsoRenderer: DsoRenderer;
@@ -77,12 +79,25 @@ export class Engine {
     this.scene.add(ambient);
 
     // ── Sub-renderers ─────────────────────────────────────────────────────────
-    this.starfieldRenderer = new StarfieldRenderer();
-    this.scene.add(this.starfieldRenderer.object);
-
     const maxAnisotropy = this.renderer.getMaxAnisotropy();
     this.earthRenderer = new EarthRenderer(maxAnisotropy, this.renderer.instance, this.camera);
     this.scene.add(this.earthRenderer.object);
+
+    // ── World (layer registry) ──────────────────────────────────────────────────
+    // Migrating subsystems into layers one at a time (Slice 5). Starfield first.
+    this.world = new World({
+      onCriticalError: (err) =>
+        useStore.getState().setLoadingError(
+          err instanceof Error ? err.message : 'A critical layer failed',
+        ),
+    });
+    this.world.register(new StarfieldLayer());
+    void this.world.init({
+      scene: this.scene,
+      camera: this.camera,
+      renderer: this.renderer.instance,
+      maxAnisotropy,
+    });
 
     // ── Satellites ───────────────────────────────────────────────────────────
     this.satelliteRenderer = new SatelliteRenderer(this.scene);
@@ -519,13 +534,27 @@ export class Engine {
     const now = simClock.date();
 
     const sunDir = getSunDirection(now);
+    const gast = getGAST(now);
     this.earthRenderer.sunDirection.copy(sunDir);
-    this.earthRenderer.object.rotation.y = getGAST(now);
+    this.earthRenderer.object.rotation.y = gast;
 
     // GPU-side interpolation factor for TLE positions
     const tickState = this.sgp4Client?.getTickState();
     const uT = tickState?.uT ?? 0.0;
     this.satelliteRenderer.material.uniforms.uT.value = uT;
+
+    // Per-frame context shared by all registered layers (Slice 5).
+    const frame: FrameContext = {
+      date: now,
+      nowMs: simClock.now(),
+      delta,
+      uT,
+      pixelRatio: this.renderer.getPixelRatio(),
+      cameraDistance: this.camera.position.length(),
+      sunDirectionECI: sunDir,
+      gastRadians: gast,
+    };
+    this.world.update(frame);
 
     this.devValidation?.tickFrame();
 
@@ -683,7 +712,7 @@ export class Engine {
     this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();
-    this.starfieldRenderer.dispose();
+    this.world.dispose();
     this.cameraRig.dispose();
     this.renderer.dispose();
   }
