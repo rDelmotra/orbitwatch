@@ -197,19 +197,23 @@ export class Engine {
       }
 
       // ── DSO layer activation (worker client + subscriptions) ─────────────────
-      this.dsoLayer.activate({
-        onDsoTrail: (dsoId, positions) => {
-          // Gate: only apply if trail is active and this DSO is selected
-          const state = useStore.getState();
-          if (!state.showOrbitTrail || state.selectedDso?.dsoId !== dsoId) return;
-          this.world.runLayerCommand(this.trailsLayer, 'generateFromPositions', () =>
-            this.trailsLayer.generateFromPositions(positions),
-          );
-        },
-        onDsoGeometry: (geometry, count) => this.gpuPicker?.addDsoGeometry(geometry, count),
-        onRefreshTrail: () => this.refreshOrbitTrail(),
-        getTleCount: () => this.catalogData.length,
-      });
+      // Guarded: if DSO init failed (non-critical) this is skipped; if activation
+      // throws, World isolates it so DSO fails soft instead of failing the TLE init.
+      this.world.runLayerCommand(this.dsoLayer, 'activate', () =>
+        this.dsoLayer.activate({
+          onDsoTrail: (dsoId, positions) => {
+            // Gate: only apply if trail is active and this DSO is selected
+            const state = useStore.getState();
+            if (!state.showOrbitTrail || state.selectedDso?.dsoId !== dsoId) return;
+            this.world.runLayerCommand(this.trailsLayer, 'generateFromPositions', () =>
+              this.trailsLayer.generateFromPositions(positions),
+            );
+          },
+          onDsoGeometry: (geometry, count) => this.gpuPicker?.addDsoGeometry(geometry, count),
+          onRefreshTrail: () => this.refreshOrbitTrail(),
+          getTleCount: () => this.catalogData.length,
+        }),
+      );
 
       // ── TLE filters subscription ────────────────────────────────────────────
       let prevCatFilters = useStore.getState().categoryFilters;
@@ -471,7 +475,10 @@ export class Engine {
     }
 
     if (state.selectedDso) {
-      this.dsoLayer.requestTrail(state.selectedDso.dsoId);
+      const dsoId = state.selectedDso.dsoId;
+      this.world.runLayerCommand(this.dsoLayer, 'requestTrail', () =>
+        this.dsoLayer.requestTrail(dsoId),
+      );
       return;
     }
 
@@ -485,7 +492,9 @@ export class Engine {
     this.satelliteRenderer.material.uniforms.uT.value = 0.0;
 
     // Immediate DSO tick at new sim-time
-    this.dsoLayer.triggerImmediateTick(simClock.now());
+    this.world.runLayerCommand(this.dsoLayer, 'triggerImmediateTick', () =>
+      this.dsoLayer.triggerImmediateTick(simClock.now()),
+    );
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());

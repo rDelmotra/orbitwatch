@@ -17,7 +17,8 @@ const HOVER_THROTTLE_MS = 100;
 export class InputManager {
   private readonly canvas: HTMLCanvasElement;
   private readonly satelliteRenderer: SatelliteRenderer;
-  private readonly dsoRenderer: DsoRenderer;
+  // Nullable: a soft-failed (non-critical) DSO layer leaves no renderer.
+  private readonly dsoRenderer: DsoRenderer | null;
   private readonly controls: OrbitControls;
 
   private readonly onSelectTle: (index: number) => void;
@@ -38,7 +39,7 @@ export class InputManager {
     deps: {
       canvas: HTMLCanvasElement;
       satelliteRenderer: SatelliteRenderer;
-      dsoRenderer: DsoRenderer;
+      dsoRenderer: DsoRenderer | null;
       controls: OrbitControls;
     },
     callbacks: {
@@ -145,7 +146,7 @@ export class InputManager {
             const dso = state.selectedDso;
             if (dso) {
               const dsoIndex = state.dsoObjects.findIndex((d) => d.dsoId === dso.dsoId);
-              if (dsoIndex >= 0) {
+              if (dsoIndex >= 0 && this.dsoRenderer) {
                 this.controls.target.copy(this.dsoRenderer.getPositionAt(dsoIndex));
               }
             }

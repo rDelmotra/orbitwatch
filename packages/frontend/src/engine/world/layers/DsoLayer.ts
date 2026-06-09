@@ -30,11 +30,12 @@ export class DsoLayer implements Layer {
   private dsoUnsub: (() => void) | null = null;
   private dsoEphemerisUnsub: (() => void) | null = null;
 
-  /** The DSO renderer. Valid after {@link init}; throws if accessed earlier. */
-  get renderer(): DsoRenderer {
-    if (!this._renderer) {
-      throw new Error('DsoLayer.renderer accessed before init()');
-    }
+  /**
+   * The DSO renderer, or null if init hasn't run / failed. Nullable on purpose:
+   * a failed non-critical DSO init must not crash consumers (InputManager) —
+   * the "DSO is non-critical" guarantee.
+   */
+  get renderer(): DsoRenderer | null {
     return this._renderer;
   }
 

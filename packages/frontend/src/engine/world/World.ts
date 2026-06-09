@@ -14,6 +14,7 @@ export class World {
   private readonly initialized = new Set<Layer>();
   private readonly failed = new Set<Layer>();
   private readonly onCriticalError: (err: unknown) => void;
+  private disposed = false;
 
   constructor(callbacks: { onCriticalError: (err: unknown) => void }) {
     this.onCriticalError = callbacks.onCriticalError;
@@ -33,15 +34,16 @@ export class World {
   init(ctx: LayerContext): void {
     for (const layer of this.layers) {
       try {
-        const result = layer.init(ctx);
-        if (result instanceof Promise) {
-          result
-            .then(() => {
-              this.initialized.add(layer);
-            })
-            .catch((err) => {
-              this.handleFailure(layer, err, 'init');
-            });
+        const result: unknown = layer.init(ctx);
+        if (isThenable(result)) {
+          result.then(
+            () => {
+              if (!this.disposed) this.initialized.add(layer);
+            },
+            (err: unknown) => {
+              if (!this.disposed) this.handleFailure(layer, err, 'init');
+            },
+          );
         } else {
           this.initialized.add(layer);
         }
@@ -89,6 +91,7 @@ export class World {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const layer of this.layers) {
       try {
         layer.dispose();
@@ -110,4 +113,13 @@ export class World {
       console.warn(`[world] layer "${layer.name}" failed at ${phase} (continuing):`, err);
     }
   }
+}
+
+/** Detects any PromiseLike (Promise, or a generic thenable from an async init). */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value != null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
