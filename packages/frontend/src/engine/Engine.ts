@@ -13,6 +13,7 @@ import type { EnrichedTLEObject } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
 import { DevValidation } from './DevValidation';
+import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
 import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 import { InputManager } from './input/InputManager';
@@ -56,6 +57,7 @@ export class Engine {
   private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
   private lastSimTimeUpdateAt = 0;
+  private isDisposed = false;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -164,6 +166,8 @@ export class Engine {
       // priming + GPU picker stay here on the render side (data/ never imports engine/).
       const { catalogData, tles } = await bootstrapCatalog(apiUrl);
 
+      if (this.isDisposed) return;
+
       this.catalogData = catalogData;
       this.inputManager?.setCatalogData(catalogData);
 
@@ -214,6 +218,10 @@ export class Engine {
           getTleCount: () => this.catalogData.length,
         }),
       );
+
+      // Global DSO catalog/manifest polling (populates the store the DSO layer
+      // reacts to) — data orchestration lives here, not in the visual layer.
+      initDsoClient().catch((err) => console.warn('DSO client init error:', err));
 
       // ── TLE filters subscription ────────────────────────────────────────────
       let prevCatFilters = useStore.getState().categoryFilters;
@@ -636,6 +644,8 @@ export class Engine {
   };
 
   dispose(): void {
+    this.isDisposed = true;
+    stopDsoClient();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }

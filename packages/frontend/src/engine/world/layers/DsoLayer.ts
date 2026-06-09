@@ -1,7 +1,6 @@
 import type * as THREE from 'three';
 import { DsoRenderer } from '../../DsoRenderer';
 import { DsoWorkerClient } from '../../dso/DsoWorkerClient';
-import { initDsoClient, stopDsoClient } from '../../../data/dso-client';
 import { useStore } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
@@ -11,6 +10,12 @@ import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
  * per-frame label projection, and the selection highlight. Non-critical: if the
  * Horizons-fed pipeline is empty/down, the rest of the scene is unaffected
  * (CLAUDE.md graceful-degradation guarantee).
+ *
+ * Boundary: DsoLayer owns the renderer and the worker *feed* for DSO visual
+ * state. The global catalog/manifest polling that populates the store
+ * (initDsoClient/stopDsoClient) is started/stopped by the Engine — that data
+ * orchestration is not a visual-layer concern, so this file must not import
+ * `data/dso-client`.
  *
  * Two-phase: `init(ctx)` builds the renderer synchronously (so the Engine can
  * hand it to InputManager); `activate(...)` wires the worker client + subs once
@@ -80,9 +85,6 @@ export class DsoLayer implements Layer {
         this.client?.requestTrail(state.selectedDso.dsoId);
       }
     });
-
-    // Start the DSO data pipeline (catalog + ephemeris fetch) — non-blocking.
-    initDsoClient().catch((err) => console.warn('DSO client init error:', err));
   }
 
   update(frame: FrameContext): void {
@@ -136,7 +138,6 @@ export class DsoLayer implements Layer {
     this.dsoUnsub = null;
     this.dsoEphemerisUnsub?.();
     this.dsoEphemerisUnsub = null;
-    stopDsoClient();
     this.client?.dispose();
     this.client = null;
     this._renderer?.dispose();
