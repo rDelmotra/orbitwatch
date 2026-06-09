@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { TLEInput, WorkerOutMessage } from '../../data/types';
 import { simClock } from '../SimClock';
+import { sourceToSceneInto } from '../../orbital/frames';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -187,9 +188,8 @@ export class Sgp4WorkerClient {
       this.prevVelocitiesTeme[i3 + 2] +
       (this.currVelocitiesTeme[i3 + 2] - this.prevVelocitiesTeme[i3 + 2]) * t;
 
-    // TEME -> Three.js axis swap (x, z, -y)
-    out.set(vx, vz, -vy);
-    return out;
+    // TEME -> Three.js scene frame
+    return sourceToSceneInto(out, vx, vy, vz);
   }
 
   // ── Sim time jump ───────────────────────────────────────────────────────

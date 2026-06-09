@@ -13,6 +13,7 @@ import {
   VISUAL_FADING_START_SIN,
   VISUAL_RANGE_MAX_KM,
 } from '../orbital/visual-visibility';
+import { writeSourceToScene } from '../orbital/frames';
 import type { VisibilityMode } from '../store/useStore';
 
 const MAX_OBJECTS = 100_000;
@@ -112,11 +113,8 @@ export class SatelliteRenderer {
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-      // ECI (TEME) → Three.js axis swap:
-      //   X stays X, ECI Z → Three.js Y, ECI Y → Three.js -Z
-      currArr[i3] = eciPositions[i3];
-      currArr[i3 + 1] = eciPositions[i3 + 2];
-      currArr[i3 + 2] = -eciPositions[i3 + 1];
+      // ECI (TEME) → Three.js scene frame
+      writeSourceToScene(currArr, i3, eciPositions[i3], eciPositions[i3 + 1], eciPositions[i3 + 2]);
     }
 
     this.prevPosAttr.needsUpdate = true;
@@ -144,15 +142,12 @@ export class SatelliteRenderer {
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-      const x = eciPositions[i3];
-      const y = eciPositions[i3 + 2];
-      const z = -eciPositions[i3 + 1];
-      currArr[i3] = x;
-      currArr[i3 + 1] = y;
-      currArr[i3 + 2] = z;
-      prevArr[i3] = x;
-      prevArr[i3 + 1] = y;
-      prevArr[i3 + 2] = z;
+      const ex = eciPositions[i3];
+      const ey = eciPositions[i3 + 1];
+      const ez = eciPositions[i3 + 2];
+      // ECI (TEME) → Three.js scene frame, written into both buffers (no tween on snap)
+      writeSourceToScene(currArr, i3, ex, ey, ez);
+      writeSourceToScene(prevArr, i3, ex, ey, ez);
     }
 
     this.prevPosAttr.needsUpdate = true;

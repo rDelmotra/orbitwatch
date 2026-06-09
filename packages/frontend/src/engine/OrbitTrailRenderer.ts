@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import * as satellite from 'satellite.js';
 import { simClock } from './SimClock';
+import { sourceToSceneInto, writeSourceToScene } from '../orbital/frames';
 
 const EARTH_RADIUS_KM = 6371;
 const TRAIL_POINTS = 360;
@@ -109,7 +110,7 @@ export class OrbitTrailRenderer {
     const now = anchorTimeMs;
 
     const positions = new Float32Array(TRAIL_POINTS * 3);
-    let lastValidX = 0, lastValidY = 0, lastValidZ = 0;
+    const lastValid = new THREE.Vector3();
 
     for (let i = 0; i < TRAIL_POINTS; i++) {
       const t = now + (i / TRAIL_POINTS) * periodMs;
@@ -118,15 +119,14 @@ export class OrbitTrailRenderer {
       const posEci = result?.position;
 
       if (posEci && typeof posEci !== 'boolean') {
-        // ECI (TEME) km → scene units (1/6371) → axis swap (x, z, -y)
-        lastValidX = posEci.x / EARTH_RADIUS_KM;
-        lastValidY = posEci.z / EARTH_RADIUS_KM;   // ECI Z → Three.js Y
-        lastValidZ = -posEci.y / EARTH_RADIUS_KM;  // ECI Y → Three.js -Z
+        // ECI (TEME) km → scene frame, scaled to Earth radii. Carry the last valid
+        // sample forward when a propagation step fails.
+        sourceToSceneInto(lastValid, posEci.x, posEci.y, posEci.z).multiplyScalar(1 / EARTH_RADIUS_KM);
       }
 
-      positions[i * 3]     = lastValidX;
-      positions[i * 3 + 1] = lastValidY;
-      positions[i * 3 + 2] = lastValidZ;
+      positions[i * 3]     = lastValid.x;
+      positions[i * 3 + 1] = lastValid.y;
+      positions[i * 3 + 2] = lastValid.z;
     }
 
     this.createTrailObjects(positions, true);
@@ -147,14 +147,8 @@ export class OrbitTrailRenderer {
     const positions = new Float32Array(pointCount * 3);
     for (let i = 0; i < pointCount; i++) {
       const i3 = i * 3;
-      const x = positionsTeme[i3];
-      const y = positionsTeme[i3 + 1];
-      const z = positionsTeme[i3 + 2];
-
-      // TEME → Three.js axis swap (x, z, -y)
-      positions[i3] = x;
-      positions[i3 + 1] = z;
-      positions[i3 + 2] = -y;
+      // TEME → Three.js scene frame
+      writeSourceToScene(positions, i3, positionsTeme[i3], positionsTeme[i3 + 1], positionsTeme[i3 + 2]);
     }
 
     this.createTrailObjects(positions, false);

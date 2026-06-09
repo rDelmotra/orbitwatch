@@ -3,6 +3,7 @@ import dsoVertexShader from '../shaders/dso.vert.glsl?raw';
 import dsoFragmentShader from '../shaders/dso.frag.glsl?raw';
 import type { DsoObject, DsoSnapshot } from '../data/dso-types';
 import { interpolateDsoPosition } from '../data/dso-interpolator';
+import { writeSourceToScene } from '../orbital/frames';
 
 const INITIAL_DSO_CAPACITY = 64;
 // Base point size passed into the shader (pixels before pixel-ratio scaling)
@@ -150,17 +151,8 @@ export class DsoRenderer {
         continue;
       }
 
-      const x = positionsTeme[i3];
-      const y = positionsTeme[i3 + 1];
-      const z = positionsTeme[i3 + 2];
-
-      // TEME → Three.js axis swap (same convention as SatelliteRenderer):
-      //   TEME X → Three.js X
-      //   TEME Z → Three.js Y
-      //   TEME Y → Three.js -Z
-      posArr[i3] = x;
-      posArr[i3 + 1] = z;
-      posArr[i3 + 2] = -y;
+      // TEME → Three.js scene frame
+      writeSourceToScene(posArr, i3, positionsTeme[i3], positionsTeme[i3 + 1], positionsTeme[i3 + 2]);
       sizeArr[i] = DSO_BASE_SIZE;
     }
 
@@ -199,13 +191,8 @@ export class DsoRenderer {
         continue;
       }
 
-      // TEME → Three.js axis swap (same convention as SatelliteRenderer):
-      //   TEME X → Three.js X
-      //   TEME Z → Three.js Y
-      //   TEME Y → Three.js -Z
-      posArr[i3]     =  pos.x;
-      posArr[i3 + 1] =  pos.z;
-      posArr[i3 + 2] = -pos.y;
+      // TEME → Three.js scene frame
+      writeSourceToScene(posArr, i3, pos.x, pos.y, pos.z);
       sizeArr[i]     = DSO_BASE_SIZE;
     }
 

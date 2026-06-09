@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { DsoSnapshot } from '../../data/dso-types';
 import { useStore } from '../../store/useStore';
+import { sourceToSceneInto } from '../../orbital/frames';
 import type { DsoWorkerInMessage, DsoWorkerOutMessage } from './dso-worker-types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -96,9 +97,8 @@ export class DsoWorkerClient {
     const vx = this.velocitiesTeme[i3];
     const vy = this.velocitiesTeme[i3 + 1];
     const vz = this.velocitiesTeme[i3 + 2];
-    // TEME -> Three.js axis swap (x, z, -y)
-    out.set(vx, vz, -vy);
-    return out;
+    // TEME -> Three.js scene frame
+    return sourceToSceneInto(out, vx, vy, vz);
   }
 
   syncIds(nextIds: string[]): void {

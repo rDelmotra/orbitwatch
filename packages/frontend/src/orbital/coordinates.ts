@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sourceToScene } from './frames';
 
 const EARTH_RADIUS_KM = 6371;
 
@@ -43,8 +44,7 @@ export function getObserverScenePosition(
   const eciZ = z;
 
   // 3. ECI -> Three.js Y-up world space
-  // THREE.x = ECI.x,  THREE.y = ECI.z (north),  THREE.z = -ECI.y
-  return new THREE.Vector3(eciX, eciZ, -eciY);
+  return sourceToScene(eciX, eciY, eciZ);
 }
 
 export function getObserverSceneAnchor(
@@ -78,5 +78,5 @@ export function getObserverECEFPosition(
   const z = r * Math.sin(lat);
 
   // ECEF -> Three.js local space (Y-up)
-  return new THREE.Vector3(x, z, -y);
+  return sourceToScene(x, y, z);
 }
