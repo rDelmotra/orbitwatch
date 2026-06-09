@@ -8,7 +8,8 @@ import {
   reconcileVisibilityModeForVisualStatus,
   type VisualListResolvedResult,
 } from '../data/visualList';
-import { fetchTleCatalog, VisualListPoller } from '../data/tle-client';
+import { VisualListPoller } from '../data/tle-client';
+import { bootstrapCatalog } from '../data/bootstrapCatalog';
 import { SatelliteRenderer } from './SatelliteRenderer';
 import { DsoRenderer } from './DsoRenderer';
 import type { EnrichedTLEObject } from '../data/types';
@@ -151,20 +152,17 @@ export class Engine {
       });
       this.visualListPoller.start();
 
-      // TLE catalog fetch (pure — no store side effects)
-      const catalog = await fetchTleCatalog(apiUrl);
-      const { catalogData, tles, categoryCounts, regimeCounts } = catalog;
-
-      useStore.getState().setCatalogInfo({
-        objectCount: catalogData.length,
-        categoryCounts,
-        regimeCounts,
+      // One-time catalog bootstrap: fetch + store seed + renderer prime + GPU picker.
+      const { catalogData, tles, gpuPicker } = await bootstrapCatalog({
+        apiUrl,
+        renderer: this.renderer.instance,
+        camera: this.camera,
+        satelliteRenderer: this.satelliteRenderer,
       });
 
       this.catalogData = catalogData;
       this.inputManager?.setCatalogData(catalogData);
 
-      useStore.getState().setCatalogData(catalogData);
       useStore.getState().setSelectByIndex((index: number) => this.nav.selectByIndex(index));
       useStore.getState().setTriggerFlyTo((index: number) => this.nav.flyToSatellite(index));
       useStore.getState().setTriggerJoyride((index: number) => this.nav.joyrideSatellite(index));
@@ -173,14 +171,7 @@ export class Engine {
       useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.nav.joyrideDso(dsoId));
       useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
 
-      this.satelliteRenderer.initFromCatalog(catalogData);
-
-      this.gpuPicker = new GPUPicker(
-        this.renderer.instance,
-        this.camera,
-        this.satelliteRenderer,
-        catalogData.length,
-      );
+      this.gpuPicker = gpuPicker;
       this.inputManager?.setGpuPicker(this.gpuPicker);
 
       if (import.meta.env.DEV) {
