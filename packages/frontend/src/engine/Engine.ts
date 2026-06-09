@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { EarthRenderer } from './EarthRenderer';
 import { getSunDirection, getGAST } from '../orbital/time';
 import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
 import {
@@ -27,6 +26,7 @@ import { NavigationController } from './controllers/NavigationController';
 import type { TrackingSource } from './controllers/TrackingSource';
 import { World } from './world/World';
 import { StarfieldLayer } from './world/layers/StarfieldLayer';
+import { EarthLayer } from './world/layers/EarthLayer';
 import type { FrameContext } from './render/Layer';
 
 const EARTH_RADIUS_KM = 6371;
@@ -40,7 +40,7 @@ export class Engine {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private clock: THREE.Clock;
-  private earthRenderer: EarthRenderer;
+  private earthLayer: EarthLayer;
   private world: World;
   private animationId: number | null = null;
   private satelliteRenderer: SatelliteRenderer;
@@ -78,19 +78,17 @@ export class Engine {
     const ambient = new THREE.AmbientLight(0x101820, 0.15);
     this.scene.add(ambient);
 
-    // ── Sub-renderers ─────────────────────────────────────────────────────────
-    const maxAnisotropy = this.renderer.getMaxAnisotropy();
-    this.earthRenderer = new EarthRenderer(maxAnisotropy, this.renderer.instance, this.camera);
-    this.scene.add(this.earthRenderer.object);
-
     // ── World (layer registry) ──────────────────────────────────────────────────
-    // Migrating subsystems into layers one at a time (Slice 5). Starfield first.
+    // Migrating subsystems into layers one at a time (Slice 5).
+    const maxAnisotropy = this.renderer.getMaxAnisotropy();
+    this.earthLayer = new EarthLayer();
     this.world = new World({
       onCriticalError: (err) =>
         useStore.getState().setLoadingError(
           err instanceof Error ? err.message : 'A critical layer failed',
         ),
     });
+    this.world.register(this.earthLayer);
     this.world.register(new StarfieldLayer());
     void this.world.init({
       scene: this.scene,
@@ -535,8 +533,6 @@ export class Engine {
 
     const sunDir = getSunDirection(now);
     const gast = getGAST(now);
-    this.earthRenderer.sunDirection.copy(sunDir);
-    this.earthRenderer.object.rotation.y = gast;
 
     // GPU-side interpolation factor for TLE positions
     const tickState = this.sgp4Client?.getTickState();
@@ -605,7 +601,6 @@ export class Engine {
       this.dsoRenderer.setSelectedDsoIndex(-1);
     }
 
-    this.earthRenderer.update(delta, this.camera);
     this.satelliteRenderer.updateUniforms(
       this.camera.position.length(),
       this.renderer.getPixelRatio(),
@@ -615,6 +610,8 @@ export class Engine {
   };
 
   private updateObserverMarker(loc: { lat: number; lon: number; alt: number } | null): void {
+    const earthGroup = this.earthLayer.group;
+    if (!earthGroup) return;
     if (loc) {
       if (!this.observerMarker) {
         // Frustum: 160 degree FOV (half-angle 80deg). radius = height * tan(80)
@@ -633,7 +630,7 @@ export class Engine {
         });
 
         this.observerMarker = new THREE.Group();
-        this.earthRenderer.object.add(this.observerMarker);
+        earthGroup.add(this.observerMarker);
 
         const mesh = new THREE.Mesh(geo, mat);
         mesh.renderOrder = 1;
@@ -663,7 +660,7 @@ export class Engine {
         normal
       );
     } else if (this.observerMarker) {
-      this.earthRenderer.object.remove(this.observerMarker);
+      earthGroup.remove(this.observerMarker);
       this.observerMarker.traverse((child) => {
         if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
           child.geometry.dispose();
@@ -698,7 +695,7 @@ export class Engine {
     this.inputManager?.dispose();
     window.removeEventListener('resize', this.onResize);
     if (this.observerMarker) {
-      this.earthRenderer.object.remove(this.observerMarker);
+      this.earthLayer.group?.remove(this.observerMarker);
       this.observerMarker.traverse((child) => {
         if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
           child.geometry.dispose();
@@ -711,7 +708,6 @@ export class Engine {
     this.dsoRenderer.dispose();
     this.orbitTrailRenderer.dispose();
     this.satelliteRenderer.dispose();
-    this.earthRenderer.dispose();
     this.world.dispose();
     this.cameraRig.dispose();
     this.renderer.dispose();
