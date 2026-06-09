@@ -23,6 +23,7 @@ import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClien
 import { DsoWorkerClient } from './dso/DsoWorkerClient';
 import { InputManager } from './input/InputManager';
 import { Renderer } from './render/Renderer';
+import { Camera } from './render/Camera';
 
 const EARTH_RADIUS_KM = 6371;
 const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
@@ -33,6 +34,7 @@ export class Engine {
 
   private renderer: Renderer;
   private scene: THREE.Scene;
+  private cameraRig: Camera;
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private clock: THREE.Clock;
@@ -75,17 +77,10 @@ export class Engine {
     // ── Scene ─────────────────────────────────────────────────────────────────
     this.scene = new THREE.Scene();
 
-    // ── Camera ────────────────────────────────────────────────────────────────
-    const aspect = canvas.clientWidth / canvas.clientHeight;
-    this.camera = new THREE.PerspectiveCamera(27, aspect, 0.01, 1000);
-    this.camera.position.set(0, 1.5, 3.5);
-
-    // ── Controls ──────────────────────────────────────────────────────────────
-    this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.minDistance = 1.08;
-    this.controls.maxDistance = 300; // expanded from 100 to reach JWST (~235 ER)
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.07;
+    // ── Camera + controls ─────────────────────────────────────────────────────
+    this.cameraRig = new Camera(canvas);
+    this.camera = this.cameraRig.instance;
+    this.controls = this.cameraRig.controls;
 
     // ── Lights ────────────────────────────────────────────────────────────────
     const ambient = new THREE.AmbientLight(0x101820, 0.15);
@@ -943,8 +938,7 @@ export class Engine {
     const canvas = this.renderer.domElement;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    this.cameraRig.resize(width, height);
     this.renderer.setSize(width, height);
   };
 
@@ -979,6 +973,7 @@ export class Engine {
     this.satelliteRenderer.dispose();
     this.earthRenderer.dispose();
     this.starfieldRenderer.dispose();
+    this.cameraRig.dispose();
     this.renderer.dispose();
   }
 }
