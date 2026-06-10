@@ -46,7 +46,6 @@ export class Engine {
   private trailsLayer: TrailsLayer;
   private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
-  private filterUnsub: (() => void) | null = null;
   private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
   private lastSimTimeUpdateAt = 0;
@@ -192,6 +191,8 @@ export class Engine {
         () =>
           this.satellitesLayer.activate(catalogData, tles, {
             getVisualNoradIds: () => this.getVisualNoradIds(),
+            onError: (err, phase) =>
+              this.world.reportLayerFailure(this.satellitesLayer, err, phase),
             onReady: () => useStore.getState().setLoadingPhase('propagating'),
             onFirstPosition: () => {
               this.inputManager?.setFirstPositionReceived(true);
@@ -200,6 +201,9 @@ export class Engine {
             onSelectionInvalidated: () =>
               useStore.getState().setSelectedSatellite(null, null),
             onTrailRefresh: () => this.refreshOrbitTrail(),
+            onObserverChange: (loc) => this.updateObserverMarker(loc),
+            onEnterObserverSky: (loc) => this.nav.focusCameraOnObserverSky(loc),
+            onExitObserverSky: () => this.nav.resetCamera(),
           }),
       );
 
@@ -241,50 +245,9 @@ export class Engine {
         initDsoClient().catch((err) => console.warn('DSO client init error:', err));
       }
 
-      // ── TLE filters subscription ────────────────────────────────────────────
-      let prevCatFilters = useStore.getState().categoryFilters;
-      let prevRegFilters = useStore.getState().regimeFilters;
-      let prevVisMode = useStore.getState().visibilityMode;
-      let prevObsLoc = useStore.getState().observerLocation;
-
-      this.filterUnsub = useStore.subscribe((state) => {
-        if (
-          state.categoryFilters !== prevCatFilters ||
-          state.regimeFilters !== prevRegFilters ||
-          state.visibilityMode !== prevVisMode ||
-          state.observerLocation !== prevObsLoc
-        ) {
-          const obsLocChanged = state.observerLocation !== prevObsLoc;
-          const modeChanged = state.visibilityMode !== prevVisMode;
-          const prevMode = prevVisMode;
-          prevCatFilters = state.categoryFilters;
-          prevRegFilters = state.regimeFilters;
-          prevVisMode = state.visibilityMode;
-          prevObsLoc = state.observerLocation;
-
-          this.world.runLayerCommand(this.satellitesLayer, 'recompute', () =>
-            this.satellitesLayer.recomputeVisibleCounts(state),
-          );
-
-          if (obsLocChanged) {
-            this.updateObserverMarker(state.observerLocation);
-          }
-
-          if (
-            state.visibilityMode === 'visual' &&
-            state.observerLocation &&
-            (modeChanged || obsLocChanged)
-          ) {
-            this.nav.focusCameraOnObserverSky(state.observerLocation);
-          } else if (modeChanged && prevMode === 'visual' && state.visibilityMode !== 'visual') {
-            this.nav.resetCamera();
-          }
-
-          if (state.showOrbitTrail && (modeChanged || obsLocChanged)) {
-            this.refreshOrbitTrail(state);
-          }
-        }
-      });
+      // (Satellite-visibility subscription — category/regime/mode/observer — now
+      // lives in SatellitesLayer.activate(); cross-cutting effects route back here
+      // via its callbacks above.)
 
       // ── Orbit trail subscription ─────────────────────────────────────────────
       let prevShowTrail = useStore.getState().showOrbitTrail;
@@ -540,7 +503,6 @@ export class Engine {
     }
     this.visualListPoller?.dispose();
     this.nav.dispose();
-    this.filterUnsub?.();
     this.trailUnsub?.();
     this.inputManager?.dispose();
     window.removeEventListener('resize', this.onResize);

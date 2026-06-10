@@ -37,6 +37,7 @@ export class SatellitesLayer implements Layer {
   private devValidation: DevValidation | null = null;
   private firstPositionReceived = false;
   private callbacks: SatellitesLayerCallbacks | null = null;
+  private filterUnsub: (() => void) | null = null;
 
   /**
    * The satellite renderer, or null if init hasn't run / failed. Nullable on
@@ -60,83 +61,159 @@ export class SatellitesLayer implements Layer {
   }
 
   /**
-   * Prime renderer geometry + start SGP4 propagation. Called by the Engine after
-   * the TLE catalog bootstrap. `init` has already run, so `_renderer` is set.
+   * Prime renderer geometry + start SGP4 propagation + own the satellite-visibility
+   * subscription. Called by the Engine after the TLE catalog bootstrap.
    */
   activate(
     catalog: EnrichedTLEObject[],
     tles: ConstructorParameters<typeof Sgp4WorkerClient>[0],
     callbacks: SatellitesLayerCallbacks,
   ): void {
-    if (!this._renderer) return;
+    if (!this._renderer) {
+      // Critical layer: activation before a successful init is a programming error,
+      // not a soft path. Throw so World.runLayerCommand escalates it (loud, not a
+      // silent no-op that would leave loading stuck at 'initializing').
+      throw new Error('SatellitesLayer.activate() called before init()');
+    }
+    const renderer = this._renderer;
     this.catalog = catalog;
     this.callbacks = callbacks;
 
-    this._renderer.initFromCatalog(catalog);
+    renderer.initFromCatalog(catalog);
     this.devValidation?.initFromCatalog(catalog);
 
     const issIndex = catalog.findIndex((d) => d.noradId === 25544);
     if (issIndex !== -1) {
-      this._renderer.setSatelliteColor(issIndex, 0.2, 1.0, 0.4);
-      this._renderer.setSatelliteSize(issIndex, 2.0);
+      renderer.setSatelliteColor(issIndex, 0.2, 1.0, 0.4);
+      renderer.setSatelliteSize(issIndex, 2.0);
     }
 
+    // Satellite visibility reacts to category/regime filters, visibility mode, and
+    // observer location — the subscription lives HERE so "what changes satellite
+    // visibility" is in one place. Cross-cutting effects (observer marker, the
+    // observer-sky camera, the orbit trail) flow back to the Engine via callbacks.
+    // Fires on Zustand's notify turn (outside World), so it's wrapped in guard() —
+    // a throw escalates to the critical-error path instead of escaping the notifier.
+    let prevCat = useStore.getState().categoryFilters;
+    let prevReg = useStore.getState().regimeFilters;
+    let prevMode = useStore.getState().visibilityMode;
+    let prevObs = useStore.getState().observerLocation;
+    this.filterUnsub = useStore.subscribe((state) => {
+      if (
+        state.categoryFilters === prevCat &&
+        state.regimeFilters === prevReg &&
+        state.visibilityMode === prevMode &&
+        state.observerLocation === prevObs
+      ) {
+        return;
+      }
+      const obsLocChanged = state.observerLocation !== prevObs;
+      const modeChanged = state.visibilityMode !== prevMode;
+      const fromMode = prevMode;
+      prevCat = state.categoryFilters;
+      prevReg = state.regimeFilters;
+      prevMode = state.visibilityMode;
+      prevObs = state.observerLocation;
+
+      this.guard('filter', () => {
+        this.recomputeVisibleCounts(state);
+
+        if (obsLocChanged) {
+          callbacks.onObserverChange(state.observerLocation);
+        }
+
+        if (
+          state.visibilityMode === 'visual' &&
+          state.observerLocation &&
+          (modeChanged || obsLocChanged)
+        ) {
+          callbacks.onEnterObserverSky(state.observerLocation);
+        } else if (modeChanged && fromMode === 'visual' && state.visibilityMode !== 'visual') {
+          callbacks.onExitObserverSky();
+        }
+
+        if (state.showOrbitTrail && (modeChanged || obsLocChanged)) {
+          callbacks.onTrailRefresh();
+        }
+      });
+    });
+
     this.client = new Sgp4WorkerClient(tles, {
-      onReady: (objectCount) => callbacks.onReady(objectCount),
+      onReady: (objectCount) => this.guard('onReady', () => callbacks.onReady(objectCount)),
       onPositions: (result) => this.onPositions(result),
     });
   }
 
+  /**
+   * Run a fn that executes in a layer-owned async callback (worker `onmessage` /
+   * store subscription) — paths World can't wrap. A throw is escalated through the
+   * critical-error route (`callbacks.onError` → `world.reportLayerFailure`) so the
+   * worker is torn down + a user-visible error shown, instead of vanishing.
+   */
+  private guard(phase: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.callbacks?.onError(err, phase);
+    }
+  }
+
   private onPositions(result: Sgp4PositionResult): void {
-    if (!this._renderer || !this.callbacks) return;
+    // Runs in the worker's onmessage turn (outside World) — guard escalates any
+    // throw in the heavy path to the critical-error route. (P1)
+    this.guard('onPositions', () => {
+      const renderer = this._renderer;
+      const callbacks = this.callbacks;
+      if (!renderer || !callbacks) return;
 
-    const state = useStore.getState();
-    const propagationDate = new Date(result.timestamp);
-    const observerPos = this.getObserverScenePositionForState(state, propagationDate);
-    const sunDir = getSunDirection(propagationDate);
-    const visualNoradIds = this.callbacks.getVisualNoradIds();
+      const state = useStore.getState();
+      const propagationDate = new Date(result.timestamp);
+      const observerPos = this.getObserverScenePositionForState(state, propagationDate);
+      const sunDir = getSunDirection(propagationDate);
+      const visualNoradIds = callbacks.getVisualNoradIds();
 
-    const counts = result.isSnap
-      ? this._renderer.snapPositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalog,
-          state.categoryFilters,
-          state.regimeFilters,
-          visualNoradIds,
-        )
-      : this._renderer.updatePositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalog,
-          state.categoryFilters,
-          state.regimeFilters,
-          visualNoradIds,
-        );
+      const counts = result.isSnap
+        ? renderer.snapPositions(
+            result.positions,
+            result.validFlags,
+            result.objectCount,
+            observerPos,
+            sunDir,
+            state.visibilityMode,
+            this.catalog,
+            state.categoryFilters,
+            state.regimeFilters,
+            visualNoradIds,
+          )
+        : renderer.updatePositions(
+            result.positions,
+            result.validFlags,
+            result.objectCount,
+            observerPos,
+            sunDir,
+            state.visibilityMode,
+            this.catalog,
+            state.categoryFilters,
+            state.regimeFilters,
+            visualNoradIds,
+          );
 
-    useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
+      useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
 
-    this._renderer.material.uniforms.uT.value = 0.0;
+      renderer.material.uniforms.uT.value = 0.0;
 
-    const post = useStore.getState();
-    if (post.showOrbitTrail && post.selectedIndex !== null) {
-      this.callbacks.onTrailRefresh();
-    }
+      const post = useStore.getState();
+      if (post.showOrbitTrail && post.selectedIndex !== null) {
+        callbacks.onTrailRefresh();
+      }
 
-    this.devValidation?.runChecks(result.positions, result.validFlags, result.objectCount);
+      this.devValidation?.runChecks(result.positions, result.validFlags, result.objectCount);
 
-    if (!this.firstPositionReceived) {
-      this.firstPositionReceived = true;
-      this.callbacks.onFirstPosition();
-    }
+      if (!this.firstPositionReceived) {
+        this.firstPositionReceived = true;
+        callbacks.onFirstPosition();
+      }
+    });
   }
 
   /** Recompute category/regime counts (filter or visual-list change), no new propagation. */
@@ -255,6 +332,8 @@ export class SatellitesLayer implements Layer {
   }
 
   dispose(): void {
+    this.filterUnsub?.();
+    this.filterUnsub = null;
     this.client?.dispose();
     this.client = null;
     this._renderer?.dispose();
@@ -267,15 +346,28 @@ export class SatellitesLayer implements Layer {
   }
 }
 
+type ObserverLoc = { lat: number; lon: number; alt: number };
+
 export interface SatellitesLayerCallbacks {
   /** Curated visual NORAD set (owned by the Engine's VisualListPoller). */
   getVisualNoradIds: () => Set<number>;
+  /**
+   * A throw surfaced in a layer-owned async callback (worker / store sub) → route
+   * to `world.reportLayerFailure` for critical escalation. (P1)
+   */
+  onError: (err: unknown, phase: string) => void;
   /** SGP4 worker reported READY → loading phase 'propagating'. */
   onReady: (objectCount: number) => void;
   /** First propagation batch arrived → input enable + loading phase 'ready'. */
   onFirstPosition: () => void;
   /** Selected satellite was filtered out (size 0) → clear the TLE selection. */
   onSelectionInvalidated: () => void;
-  /** New positions arrived while a trail is active → regenerate it. */
+  /** New positions / filter change while a trail is active → regenerate it. */
   onTrailRefresh: () => void;
+  /** Observer location changed → reposition the observer marker. */
+  onObserverChange: (loc: ObserverLoc | null) => void;
+  /** Entered visual mode (or moved) with an observer set → snap the sky camera. */
+  onEnterObserverSky: (loc: ObserverLoc) => void;
+  /** Left visual mode → return the camera home. */
+  onExitObserverSky: () => void;
 }

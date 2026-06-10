@@ -91,6 +91,20 @@ export class World {
     }
   }
 
+  /**
+   * Escalate a failure that surfaced OUTSIDE the init / update / runLayerCommand
+   * paths — i.e. inside a layer's own async callback (a worker `onmessage` or a
+   * store subscription), which runs on its own event-loop turn with no World
+   * try/catch around it. Applies the SAME severity-aware handling: mark failed,
+   * escalate critical via `onCriticalError`, dispose the layer once. A critical
+   * layer (satellites) wires its worker/subscription callbacks to this so a
+   * runtime throw becomes a user-visible error instead of vanishing.
+   */
+  reportLayerFailure(layer: Layer, err: unknown, phase: string): void {
+    if (this.disposed || this.failed.has(layer)) return;
+    this.handleFailure(layer, err, phase);
+  }
+
   /** Placeholder for the future post-processing composer (reference 05). */
   getEffects(): object[] {
     return [];
