@@ -22,12 +22,22 @@ export function LoadingScreen() {
   const [fading, setFading] = useState(false);
 
   useEffect(() => {
+    // A critical failure — even one that happens AFTER the app loaded — must
+    // re-assert the overlay so the error is never invisible behind a faded-out
+    // (or unmounted) loading screen. This also wins the race against the ready
+    // fade: when loadingError flips null→set, the previous run's cleanup clears
+    // the pending hide timer before this branch forces the overlay back.
+    if (loadingError) {
+      setVisible(true);
+      setFading(false);
+      return;
+    }
     if (loadingPhase === 'ready') {
       setFading(true);
       const timer = setTimeout(() => setVisible(false), 1000);
       return () => clearTimeout(timer);
     }
-  }, [loadingPhase]);
+  }, [loadingPhase, loadingError]);
 
   if (!visible) return null;
 

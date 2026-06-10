@@ -50,6 +50,7 @@ export class Engine {
   private observerMarker: THREE.Group | null = null;
   private lastSimTimeUpdateAt = 0;
   private isDisposed = false;
+  private criticalFailed = false;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -75,10 +76,7 @@ export class Engine {
     this.dsoLayer = new DsoLayer();
     this.satellitesLayer = new SatellitesLayer();
     this.world = new World({
-      onCriticalError: (err) =>
-        useStore.getState().setLoadingError(
-          err instanceof Error ? err.message : 'A critical layer failed',
-        ),
+      onCriticalError: (err) => this.handleCriticalError(err),
     });
     this.world.register(this.earthLayer);
     this.world.register(new StarfieldLayer());
@@ -207,8 +205,15 @@ export class Engine {
           }),
       );
 
+      if (!satellitesActivated) {
+        // The product-critical layer is dead. World.onCriticalError →
+        // handleCriticalError() has already shown the error + torn down the
+        // loop/picker/input; don't keep wiring DSO/trail onto a dead engine.
+        return;
+      }
+
       const satelliteRenderer = this.satellitesLayer.renderer;
-      if (satellitesActivated && satelliteRenderer) {
+      if (satelliteRenderer) {
         this.gpuPicker = new GPUPicker(
           this.renderer.instance,
           this.camera,
@@ -374,8 +379,37 @@ export class Engine {
   }
 
   start(): void {
+    // A critical layer that died during construction already tore everything
+    // down — don't spin up a render loop over a dead engine.
+    if (this.criticalFailed) return;
     this.clock.start();
     this.loop();
+  }
+
+  /**
+   * A critical layer (satellites = the product) failed — at init OR at runtime.
+   * Show the error and tear down the infrastructure that holds references to the
+   * now-disposed satellite renderer (the GPU picker + input listeners) and stop
+   * the render loop, so nothing touches freed GL after the failure. Idempotent.
+   * (World disposes the failed layer itself; this handles the Engine-owned
+   * consumers World can't see.)
+   */
+  private handleCriticalError(err: unknown): void {
+    if (this.criticalFailed) return;
+    this.criticalFailed = true;
+
+    useStore.getState().setLoadingError(
+      err instanceof Error ? err.message : 'A critical layer failed',
+    );
+
+    if (this.animationId !== null) {
+      cancelAnimationFrame(this.animationId);
+      this.animationId = null;
+    }
+    this.inputManager?.dispose();
+    this.inputManager = null;
+    this.gpuPicker?.dispose();
+    this.gpuPicker = null;
   }
 
   private loop = (): void => {
