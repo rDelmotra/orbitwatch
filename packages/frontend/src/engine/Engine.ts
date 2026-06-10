@@ -24,6 +24,7 @@ import { TrailsLayer } from './world/layers/TrailsLayer';
 import { DsoLayer } from './world/layers/DsoLayer';
 import { SatellitesLayer } from './world/layers/SatellitesLayer';
 import { ObserverMarkerLayer } from './world/layers/ObserverMarkerLayer';
+import { registerEngineCommands, type EngineCommands } from './command/EngineCommands';
 import type { FrameContext } from './render/Layer';
 
 export class Engine {
@@ -173,13 +174,7 @@ export class Engine {
       this.catalogData = catalogData;
       this.inputManager?.setCatalogData(catalogData);
 
-      useStore.getState().setSelectByIndex((index: number) => this.nav.selectByIndex(index));
-      useStore.getState().setTriggerFlyTo((index: number) => this.nav.flyToSatellite(index));
-      useStore.getState().setTriggerJoyride((index: number) => this.nav.joyrideSatellite(index));
-      useStore.getState().setTriggerResetCamera(() => this.nav.resetCamera());
-      useStore.getState().setTriggerFlyToDso((dsoId: string) => this.nav.flyToDso(dsoId));
-      useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.nav.joyrideDso(dsoId));
-      useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
+      registerEngineCommands(this.buildEngineCommands());
 
       // ── Satellites layer activation (renderer prime + SGP4 worker) ───────────
       // Critical layer: if activate throws, World escalates it (onCriticalError →
@@ -309,6 +304,22 @@ export class Engine {
         this.satellitesLayer.getTleKinematics(index, uT, outPos, outVel),
       getDsoKinematics: (dsoIndex, outPos, outVel) =>
         this.dsoLayer.getDsoKinematics(dsoIndex, outPos, outVel),
+    };
+  }
+
+  /**
+   * The imperative command surface the UI (+ future voicebot) triggers on the
+   * engine — bound to the NavigationController + sim-time hook, registered once.
+   */
+  private buildEngineCommands(): EngineCommands {
+    return {
+      selectByIndex: (index) => this.nav.selectByIndex(index),
+      flyTo: (index) => this.nav.flyToSatellite(index),
+      joyride: (index) => this.nav.joyrideSatellite(index),
+      resetCamera: () => this.nav.resetCamera(),
+      flyToDso: (dsoId) => this.nav.flyToDso(dsoId),
+      joyrideDso: (dsoId) => this.nav.joyrideDso(dsoId),
+      simTimeJump: () => this.onSimTimeJump(),
     };
   }
 
