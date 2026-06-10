@@ -1,21 +1,18 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getSunDirection, getGAST } from '../orbital/time';
-import { getObserverScenePosition, getObserverECEFPosition } from '../orbital/coordinates';
+import { getObserverECEFPosition } from '../orbital/coordinates';
 import {
   reconcileVisibilityModeForVisualStatus,
   type VisualListResolvedResult,
 } from '../data/visualList';
 import { VisualListPoller } from '../data/tle-client';
 import { bootstrapCatalog } from '../data/bootstrapCatalog';
-import { SatelliteRenderer } from './SatelliteRenderer';
 import type { EnrichedTLEObject } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
-import { DevValidation } from './DevValidation';
 import { initDsoClient, stopDsoClient } from '../data/dso-client';
 import { simClock } from './SimClock';
-import { Sgp4WorkerClient, type Sgp4PositionResult } from './tle/Sgp4WorkerClient';
 import { InputManager } from './input/InputManager';
 import { Renderer } from './render/Renderer';
 import { Camera } from './render/Camera';
@@ -26,9 +23,8 @@ import { StarfieldLayer } from './world/layers/StarfieldLayer';
 import { EarthLayer } from './world/layers/EarthLayer';
 import { TrailsLayer } from './world/layers/TrailsLayer';
 import { DsoLayer } from './world/layers/DsoLayer';
+import { SatellitesLayer } from './world/layers/SatellitesLayer';
 import type { FrameContext } from './render/Layer';
-
-const EARTH_RADIUS_KM = 6371;
 
 export class Engine {
   private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
@@ -42,10 +38,8 @@ export class Engine {
   private earthLayer: EarthLayer;
   private world: World;
   private animationId: number | null = null;
-  private satelliteRenderer: SatelliteRenderer;
+  private satellitesLayer: SatellitesLayer;
   private dsoLayer: DsoLayer;
-  private sgp4Client: Sgp4WorkerClient | null = null;
-  private firstPositionReceived = false;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
   private inputManager: InputManager | null = null;
@@ -53,7 +47,6 @@ export class Engine {
   private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
   private filterUnsub: (() => void) | null = null;
-  private devValidation: DevValidation | null = null;
   private visualListPoller: VisualListPoller | null = null;
   private observerMarker: THREE.Group | null = null;
   private lastSimTimeUpdateAt = 0;
@@ -81,6 +74,7 @@ export class Engine {
     this.earthLayer = new EarthLayer();
     this.trailsLayer = new TrailsLayer();
     this.dsoLayer = new DsoLayer();
+    this.satellitesLayer = new SatellitesLayer();
     this.world = new World({
       onCriticalError: (err) =>
         useStore.getState().setLoadingError(
@@ -91,6 +85,9 @@ export class Engine {
     this.world.register(new StarfieldLayer());
     this.world.register(this.trailsLayer);
     this.world.register(this.dsoLayer);
+    // Satellites registered last so the point cloud is added to the scene last
+    // (drawn over Earth/DSO), matching the prior inline order.
+    this.world.register(this.satellitesLayer);
     // Synchronous layers (all current ones) fully init in this call, so their
     // renderers are ready for InputManager / TrackingSource below.
     this.world.init({
@@ -99,9 +96,6 @@ export class Engine {
       renderer: this.renderer.instance,
       maxAnisotropy,
     });
-
-    // ── Satellites ───────────────────────────────────────────────────────────
-    this.satelliteRenderer = new SatelliteRenderer(this.scene);
 
     // ── Navigation (camera state machine) ──────────────────────────────────────
     this.nav = new NavigationController(
@@ -118,24 +112,29 @@ export class Engine {
     window.addEventListener('resize', this.onResize);
 
     // ── Input manager ─────────────────────────────────────────────────────────
-    this.inputManager = new InputManager(
-      {
-        canvas,
-        satelliteRenderer: this.satelliteRenderer,
-        dsoRenderer: this.dsoLayer.renderer,
-        controls: this.controls,
-      },
-      {
-        onSelectTle: (index) => this.nav.selectByIndex(index),
-        onSelectDso: (dsoIndex) => this.nav.selectDsoByIndex(dsoIndex),
-        onDeselect: () => {
-          useStore.getState().setSelectedSatellite(null, null);
-          useStore.getState().setSelectedDso(null);
+    // Guarded: a critical satellites-init failure leaves no renderer (and has
+    // already escalated to the error screen), so skip input wiring entirely.
+    const satelliteRenderer = this.satellitesLayer.renderer;
+    if (satelliteRenderer) {
+      this.inputManager = new InputManager(
+        {
+          canvas,
+          satelliteRenderer,
+          dsoRenderer: this.dsoLayer.renderer,
+          controls: this.controls,
         },
-        onDragExitFollow: () => this.nav.notifyDragExitedFollowing(),
-        onJoyrideLookInput: (dx, dy) => this.nav.addJoyrideLookInput(dx, dy),
-      },
-    );
+        {
+          onSelectTle: (index) => this.nav.selectByIndex(index),
+          onSelectDso: (dsoIndex) => this.nav.selectDsoByIndex(dsoIndex),
+          onDeselect: () => {
+            useStore.getState().setSelectedSatellite(null, null);
+            useStore.getState().setSelectedDso(null);
+          },
+          onDragExitFollow: () => this.nav.notifyDragExitedFollowing(),
+          onJoyrideLookInput: (dx, dy) => this.nav.addJoyrideLookInput(dx, dy),
+        },
+      );
+    }
 
     // ── Load TLE data and start propagation ───────────────────────────────────
     this.initWorker();
@@ -179,25 +178,40 @@ export class Engine {
       useStore.getState().setTriggerJoyrideDso((dsoId: string) => this.nav.joyrideDso(dsoId));
       useStore.getState().setTriggerSimTimeJump(() => this.onSimTimeJump());
 
-      this.satelliteRenderer.initFromCatalog(catalogData);
+      // ── Satellites layer activation (renderer prime + SGP4 worker) ───────────
+      // Critical layer: if activate throws, World escalates it (onCriticalError →
+      // setLoadingError) — same user-visible outcome as the old try/catch around
+      // worker construction. The GPU picker is built right after activate returns;
+      // safe because the worker's first POSITIONS message is async (a later task).
+      console.log(`Loaded ${tles.length} TLEs from backend`);
+      useStore.getState().setLoadingPhase('initializing');
 
-      this.gpuPicker = new GPUPicker(
-        this.renderer.instance,
-        this.camera,
-        this.satelliteRenderer,
-        catalogData.length,
+      const satellitesActivated = this.world.runLayerCommand(
+        this.satellitesLayer,
+        'activate',
+        () =>
+          this.satellitesLayer.activate(catalogData, tles, {
+            getVisualNoradIds: () => this.getVisualNoradIds(),
+            onReady: () => useStore.getState().setLoadingPhase('propagating'),
+            onFirstPosition: () => {
+              this.inputManager?.setFirstPositionReceived(true);
+              useStore.getState().setLoadingPhase('ready');
+            },
+            onSelectionInvalidated: () =>
+              useStore.getState().setSelectedSatellite(null, null),
+            onTrailRefresh: () => this.refreshOrbitTrail(),
+          }),
       );
-      this.inputManager?.setGpuPicker(this.gpuPicker);
 
-      if (import.meta.env.DEV) {
-        this.devValidation = new DevValidation();
-        this.devValidation.initFromCatalog(catalogData);
-      }
-
-      const issIndex = catalogData.findIndex((d) => d.noradId === 25544);
-      if (issIndex !== -1) {
-        this.satelliteRenderer.setSatelliteColor(issIndex, 0.2, 1.0, 0.4);
-        this.satelliteRenderer.setSatelliteSize(issIndex, 2.0);
+      const satelliteRenderer = this.satellitesLayer.renderer;
+      if (satellitesActivated && satelliteRenderer) {
+        this.gpuPicker = new GPUPicker(
+          this.renderer.instance,
+          this.camera,
+          satelliteRenderer,
+          catalogData.length,
+        );
+        this.inputManager?.setGpuPicker(this.gpuPicker);
       }
 
       // ── DSO layer activation (worker client + subscriptions) ─────────────────
@@ -248,7 +262,9 @@ export class Engine {
           prevVisMode = state.visibilityMode;
           prevObsLoc = state.observerLocation;
 
-          this.recomputeVisibleCounts(state);
+          this.world.runLayerCommand(this.satellitesLayer, 'recompute', () =>
+            this.satellitesLayer.recomputeVisibleCounts(state),
+          );
 
           if (obsLocChanged) {
             this.updateObserverMarker(state.observerLocation);
@@ -291,17 +307,6 @@ export class Engine {
 
         this.refreshOrbitTrail(state);
       });
-
-      console.log(`Loaded ${tles.length} TLEs from backend`);
-      useStore.getState().setLoadingPhase('initializing');
-
-      this.sgp4Client = new Sgp4WorkerClient(tles, {
-        onReady: (objectCount) => {
-          console.log(`SGP4 worker ready: ${objectCount} objects`);
-          useStore.getState().setLoadingPhase('propagating');
-        },
-        onPositions: (result) => this.onSgp4Positions(result),
-      });
     } catch (err) {
       console.error('Failed to initialize SGP4 worker:', err);
       useStore.getState().setLoadingError(
@@ -310,131 +315,21 @@ export class Engine {
     }
   }
 
-  private onSgp4Positions(result: Sgp4PositionResult): void {
-    const state = useStore.getState();
-    const propagationDate = new Date(result.timestamp);
-    const observerPos = this.getObserverScenePositionForState(state, propagationDate);
-    const sunDir = getSunDirection(propagationDate);
-
-    const counts = result.isSnap
-      ? this.satelliteRenderer.snapPositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalogData,
-          state.categoryFilters,
-          state.regimeFilters,
-          this.getVisualNoradIds()
-        )
-      : this.satelliteRenderer.updatePositions(
-          result.positions,
-          result.validFlags,
-          result.objectCount,
-          observerPos,
-          sunDir,
-          state.visibilityMode,
-          this.catalogData,
-          state.categoryFilters,
-          state.regimeFilters,
-          this.getVisualNoradIds()
-        );
-
-    useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
-
-    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
-
-    if (state.showOrbitTrail && state.selectedIndex !== null) {
-      this.refreshOrbitTrail(state);
-    }
-
-    this.devValidation?.runChecks(result.positions, result.validFlags, result.objectCount);
-
-    if (!this.firstPositionReceived) {
-      this.firstPositionReceived = true;
-      this.inputManager?.setFirstPositionReceived(true);
-      useStore.getState().setLoadingPhase('ready');
-    }
-  }
-
-  private getObserverScenePositionForState(
-    state: ReturnType<typeof useStore.getState>,
-    date: Date,
-  ): THREE.Vector3 | null {
-    if (state.visibilityMode === 'all' || !state.observerLocation) {
-      return null;
-    }
-
-    return getObserverScenePosition(
-      state.observerLocation.lat,
-      state.observerLocation.lon,
-      state.observerLocation.alt,
-      date,
-    );
-  }
-
-  private recomputeVisibleCounts(state: ReturnType<typeof useStore.getState>): void {
-    if (!this.firstPositionReceived || this.catalogData.length === 0) {
-      return;
-    }
-
-    const simDate = simClock.date();
-    const observerPos = this.getObserverScenePositionForState(state, simDate);
-    const sunDir = getSunDirection(simDate);
-
-    const counts = this.satelliteRenderer.applyFilters(
-      this.catalogData,
-      state.categoryFilters,
-      state.regimeFilters,
-      observerPos,
-      sunDir,
-      state.visibilityMode,
-      this.getVisualNoradIds(),
-    );
-    useStore.getState().setVisibleCounts(counts.categoryCounts, counts.regimeCounts);
-
-    const sel = state.selectedIndex;
-    if (sel !== null && sel < this.catalogData.length) {
-      const sizeArr = this.satelliteRenderer.mesh.geometry.getAttribute('size').array as Float32Array;
-      if (sizeArr[sel] < 0.01) {
-        useStore.getState().setSelectedSatellite(null, null);
-      }
-    }
-  }
-
   /**
    * Build the {@link TrackingSource} adapter the NavigationController reads through.
-   * This is the only place that bridges the camera to the renderers + worker clients,
-   * keeping the controller itself free of those imports. Uses live field reads +
-   * optional chaining so it's valid before the workers exist (created in initWorker).
+   * This is the only place that bridges the camera to the layers, keeping the
+   * controller itself free of those imports. Uses live field reads + optional
+   * chaining so it's valid before the catalog/worker exist (set in initWorker).
    */
   private createTrackingSource(): TrackingSource {
     return {
-      isReady: () => this.firstPositionReceived,
+      isReady: () => this.satellitesLayer.isReady(),
       getTleCount: () => this.catalogData.length,
       getTleObject: (index) => this.catalogData[index],
-      getTleAltitudeKm: (index) => {
-        const posArr = this.satelliteRenderer.mesh.geometry.getAttribute('currentPosition');
-        const x = posArr.getX(index);
-        const y = posArr.getY(index);
-        const z = posArr.getZ(index);
-        const magnitude = Math.sqrt(x * x + y * y + z * z);
-        return (magnitude * EARTH_RADIUS_KM) - EARTH_RADIUS_KM;
-      },
-      getInterpolationFactor: () => this.satelliteRenderer.material.uniforms.uT.value as number,
-      getTleKinematics: (index, uT, outPos, outVel) => {
-        if (index < 0 || index >= this.catalogData.length) return false;
-        outPos.copy(this.satelliteRenderer.getInterpolatedPosition(index, uT));
-        // Never leave outVel stale: zero it when the worker client isn't up yet.
-        if (this.sgp4Client) {
-          this.sgp4Client.getInterpolatedVelocity(index, uT, outVel);
-        } else {
-          outVel.set(0, 0, 0);
-        }
-        return true;
-      },
+      getTleAltitudeKm: (index) => this.satellitesLayer.getTleAltitudeKm(index),
+      getInterpolationFactor: () => this.satellitesLayer.getInterpolationFactor(),
+      getTleKinematics: (index, uT, outPos, outVel) =>
+        this.satellitesLayer.getTleKinematics(index, uT, outPos, outVel),
       getDsoKinematics: (dsoIndex, outPos, outVel) =>
         this.dsoLayer.getDsoKinematics(dsoIndex, outPos, outVel),
     };
@@ -465,7 +360,9 @@ export class Engine {
       store.setVisibilityMode(nextMode);
     }
 
-    this.recomputeVisibleCounts(useStore.getState());
+    this.world.runLayerCommand(this.satellitesLayer, 'recompute', () =>
+      this.satellitesLayer.recomputeVisibleCounts(useStore.getState()),
+    );
   }
 
   private refreshOrbitTrail(
@@ -479,7 +376,7 @@ export class Engine {
     const selectedIndex = state.selectedIndex;
     if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < this.catalogData.length) {
       const sat = this.catalogData[selectedIndex];
-      const anchorMs = this.sgp4Client?.getCurrentPropagationTimestampMs() ?? simClock.now();
+      const anchorMs = this.satellitesLayer.getPropagationTimestampMs();
       this.world.runLayerCommand(this.trailsLayer, 'generate', () =>
         this.trailsLayer.generate(sat.line1, sat.line2, anchorMs),
       );
@@ -499,9 +396,10 @@ export class Engine {
 
   /** Called by store actions on rate change, jumpTo, or reset. */
   private onSimTimeJump(): void {
-    // SGP4: immediate snap + reschedule (all handled internally)
-    this.sgp4Client?.requestImmediateSnap();
-    this.satelliteRenderer.material.uniforms.uT.value = 0.0;
+    // SGP4: immediate snap + reset interpolation tween (handled in the layer)
+    this.world.runLayerCommand(this.satellitesLayer, 'requestImmediateSnap', () =>
+      this.satellitesLayer.requestImmediateSnap(),
+    );
 
     // Immediate DSO tick at new sim-time
     this.world.runLayerCommand(this.dsoLayer, 'triggerImmediateTick', () =>
@@ -525,10 +423,17 @@ export class Engine {
     const sunDir = getSunDirection(now);
     const gast = getGAST(now);
 
-    // GPU-side interpolation factor for TLE positions
-    const tickState = this.sgp4Client?.getTickState();
-    const uT = tickState?.uT ?? 0.0;
-    this.satelliteRenderer.material.uniforms.uT.value = uT;
+    // GPU-side interpolation factor for TLE positions (owned by SatellitesLayer).
+    const uT = this.satellitesLayer.getInterpolationFactor();
+
+    // Camera state machine runs FIRST so the frame carries this-frame camera
+    // position/distance (Earth/DSO LOD + label projection) and the freshest
+    // selection arrival time for the satellite glow.
+    this.nav.update(uT);
+    const arrivalTime = this.nav.getArrivalTime();
+    const selectionTimeSinceArrival = arrivalTime > 0
+      ? (performance.now() - arrivalTime) / 1000
+      : -1.0;
 
     // Per-frame context shared by all registered layers (Slice 5).
     const navState = useStore.getState();
@@ -543,10 +448,9 @@ export class Engine {
       gastRadians: gast,
       isJoyrideTracking:
         navState.cameraMode === 'following' && navState.trackingStyle === 'joyride',
+      selectionTimeSinceArrival,
     };
     this.world.update(frame);
-
-    this.devValidation?.tickFrame();
 
     // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
     const wallNow = performance.now();
@@ -555,25 +459,6 @@ export class Engine {
       this.lastSimTimeUpdateAt = wallNow;
     }
 
-    // ── Camera mode handling ─────────────────────────────────────────────────
-    const selectedIdx = useStore.getState().selectedIndex;
-
-    this.nav.update(uT);
-
-    // ── TLE selection shader uniforms ─────────────────────────────────────────
-    const arrivalTime = this.nav.getArrivalTime();
-    const timeSinceArrival = arrivalTime > 0
-      ? (performance.now() - arrivalTime) / 1000
-      : -1.0;
-    this.satelliteRenderer.updateSelectedUniforms(
-      selectedIdx !== null ? selectedIdx : -1,
-      timeSinceArrival,
-    );
-
-    this.satelliteRenderer.updateUniforms(
-      this.camera.position.length(),
-      this.renderer.getPixelRatio(),
-    );
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -653,7 +538,6 @@ export class Engine {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
     }
-    this.sgp4Client?.dispose();
     this.visualListPoller?.dispose();
     this.nav.dispose();
     this.filterUnsub?.();
@@ -670,8 +554,9 @@ export class Engine {
       });
       this.observerMarker = null;
     }
+    // GPU picker references the satellite renderer's geometry — dispose it before
+    // World disposes the SatellitesLayer.
     this.gpuPicker?.dispose();
-    this.satelliteRenderer.dispose();
     this.world.dispose();
     this.cameraRig.dispose();
     this.renderer.dispose();

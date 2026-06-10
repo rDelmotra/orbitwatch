@@ -38,6 +38,12 @@ export interface FrameContext {
   gastRadians: number;
   /** Camera is following a target in first-person joyride style (trail dims). */
   isJoyrideTracking: boolean;
+  /**
+   * Seconds since the camera arrived at the selected object (drives the TLE
+   * selection glow), or -1 if none. Computed once per frame from
+   * `nav.getArrivalTime()`; consumed only by SatellitesLayer.
+   */
+  selectionTimeSinceArrival: number;
 }
 
 export interface Layer {
