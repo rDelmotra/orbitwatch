@@ -13,6 +13,7 @@ export class World {
   private readonly layers: Layer[] = [];
   private readonly initialized = new Set<Layer>();
   private readonly failed = new Set<Layer>();
+  private readonly disposedLayers = new Set<Layer>();
   private readonly onCriticalError: (err: unknown) => void;
   private disposed = false;
 
@@ -98,15 +99,12 @@ export class World {
   dispose(): void {
     this.disposed = true;
     for (const layer of this.layers) {
-      try {
-        layer.dispose();
-      } catch (err) {
-        console.error(`[world] ${layer.name} dispose failed:`, err);
-      }
+      this.disposeLayerOnce(layer);
     }
     this.layers.length = 0;
     this.initialized.clear();
     this.failed.clear();
+    this.disposedLayers.clear();
   }
 
   private handleFailure(layer: Layer, err: unknown, phase: string): void {
@@ -116,6 +114,21 @@ export class World {
       this.onCriticalError(err);
     } else {
       console.warn(`[world] layer "${layer.name}" failed at ${phase} (continuing):`, err);
+    }
+    // A failed layer is dead (skipped forever) — free its resources now so a
+    // soft-failed non-critical layer doesn't leak its worker/GL until full
+    // Engine disposal. Idempotent via disposedLayers (dispose() runs once).
+    this.disposeLayerOnce(layer);
+  }
+
+  /** Dispose a layer at most once (failure path + dispose() both call this). */
+  private disposeLayerOnce(layer: Layer): void {
+    if (this.disposedLayers.has(layer)) return;
+    this.disposedLayers.add(layer);
+    try {
+      layer.dispose();
+    } catch (err) {
+      console.error(`[world] ${layer.name} dispose failed:`, err);
     }
   }
 }

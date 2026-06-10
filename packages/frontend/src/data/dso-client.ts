@@ -126,11 +126,12 @@ async function fetchManifest(): Promise<DsoManifest | null> {
   }
 }
 
-async function loadAllEphemeris(entries: DsoCatalogEntry[]): Promise<void> {
+async function loadAllEphemeris(entries: DsoCatalogEntry[], myGen: number): Promise<void> {
   const store = useStore.getState();
   for (const entry of entries) {
     if (!entry.availability || !entry.currentSnapshotVersion) continue;
     const snapshot = await fetchEphemeris(entry.dsoId);
+    if (generation !== myGen) return; // torn down mid-load — stop mutating store
     if (snapshot) {
       store.setDsoEphemeris(entry.dsoId, snapshot);
       knownVersions.set(entry.dsoId, snapshot.snapshotVersion);
@@ -142,9 +143,9 @@ async function loadAllEphemeris(entries: DsoCatalogEntry[]): Promise<void> {
  * Poll the manifest endpoint. If any DSO's snapshotVersion changed,
  * re-fetch its ephemeris and update the store.
  */
-async function pollManifest(): Promise<void> {
+async function pollManifest(myGen: number): Promise<void> {
   const manifest = await fetchManifest();
-  if (!manifest) return;
+  if (generation !== myGen || !manifest) return;
 
   const store = useStore.getState();
 
@@ -156,6 +157,7 @@ async function pollManifest(): Promise<void> {
 
     // Version changed — re-fetch
     const snapshot = await fetchEphemeris(dsoId);
+    if (generation !== myGen) return; // torn down mid-poll — stop mutating store
     if (snapshot) {
       store.setDsoEphemeris(dsoId, snapshot);
       knownVersions.set(dsoId, snapshot.snapshotVersion);
@@ -187,7 +189,7 @@ export async function initDsoClient(): Promise<void> {
   const store = useStore.getState();
   store.setDsoObjects(dsoObjects);
 
-  await loadAllEphemeris(catalog.objects);
+  await loadAllEphemeris(catalog.objects, myGen);
   if (generation !== myGen) return; // torn down during ephemeris load — abort
   pollIntervalMs = MANIFEST_POLL_MS;
   startPolling();
@@ -195,10 +197,12 @@ export async function initDsoClient(): Promise<void> {
 
 function startPolling(): void {
   if (pollTimer) return;
+  const myGen = generation;
   pollTimer = setTimeout(async function poll() {
     try {
       // Re-fetch catalog to pick up newly enabled DSOs
       const catalog = await fetchCatalog();
+      if (generation !== myGen) return; // torn down mid-poll — stop
       if (catalog && catalog.objects.length > 0) {
         pollIntervalMs = MANIFEST_POLL_MS;
         const dsoObjects = catalog.objects
@@ -211,12 +215,12 @@ function startPolling(): void {
         pollIntervalMs = CATALOG_BOOTSTRAP_POLL_MS;
       }
 
-      await pollManifest();
+      await pollManifest(myGen);
     } catch (err) {
       console.warn('DSO poll error:', err);
     }
 
-    if (pollTimer !== null) {
+    if (pollTimer !== null && generation === myGen) {
       pollTimer = setTimeout(poll, pollIntervalMs);
     }
   }, pollIntervalMs);

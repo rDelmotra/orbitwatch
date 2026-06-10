@@ -69,8 +69,10 @@ export class DsoLayer implements Layer {
     // Seed from the CURRENT store immediately: a remount / HMR / late DSO
     // bootstrap may have already populated dsoObjects before this layer
     // activated, in which case the change-only subscription would never fire and
-    // the renderer would stay empty. (The worker self-seeds ids + snapshots from
-    // the store in its own constructor, so only the renderer needs seeding here.)
+    // the renderer would stay empty. The worker self-seeds ids + ephemeris from
+    // the store in DsoWorkerClient.bootstrapState() (ctor → spawnWorker →
+    // bootstrapState posts INIT_SNAPSHOTS with dsoEphemerisById), so only the
+    // renderer geometry needs seeding here.
     const initialDsoObjects = useStore.getState().dsoObjects;
     if (initialDsoObjects.length > 0) {
       this.syncCatalog(initialDsoObjects);
