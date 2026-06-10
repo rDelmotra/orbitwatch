@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getSunDirection, getGAST } from '../orbital/time';
-import { getObserverECEFPosition } from '../orbital/coordinates';
 import {
   reconcileVisibilityModeForVisualStatus,
   type VisualListResolvedResult,
@@ -24,6 +23,7 @@ import { EarthLayer } from './world/layers/EarthLayer';
 import { TrailsLayer } from './world/layers/TrailsLayer';
 import { DsoLayer } from './world/layers/DsoLayer';
 import { SatellitesLayer } from './world/layers/SatellitesLayer';
+import { ObserverMarkerLayer } from './world/layers/ObserverMarkerLayer';
 import type { FrameContext } from './render/Layer';
 
 export class Engine {
@@ -39,6 +39,7 @@ export class Engine {
   private world: World;
   private animationId: number | null = null;
   private satellitesLayer: SatellitesLayer;
+  private observerMarkerLayer: ObserverMarkerLayer;
   private dsoLayer: DsoLayer;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -47,7 +48,6 @@ export class Engine {
   private nav: NavigationController;
   private trailUnsub: (() => void) | null = null;
   private visualListPoller: VisualListPoller | null = null;
-  private observerMarker: THREE.Group | null = null;
   private lastSimTimeUpdateAt = 0;
   private isDisposed = false;
   private criticalFailed = false;
@@ -72,6 +72,7 @@ export class Engine {
     // Migrating subsystems into layers one at a time (Slice 5).
     const maxAnisotropy = this.renderer.getMaxAnisotropy();
     this.earthLayer = new EarthLayer();
+    this.observerMarkerLayer = new ObserverMarkerLayer();
     this.trailsLayer = new TrailsLayer();
     this.dsoLayer = new DsoLayer();
     this.satellitesLayer = new SatellitesLayer();
@@ -79,11 +80,13 @@ export class Engine {
       onCriticalError: (err) => this.handleCriticalError(err),
     });
     this.world.register(this.earthLayer);
+    this.world.register(this.observerMarkerLayer);
     this.world.register(new StarfieldLayer());
     this.world.register(this.trailsLayer);
     this.world.register(this.dsoLayer);
     // Satellites registered last so the point cloud is added to the scene last
-    // (drawn over Earth/DSO), matching the prior inline order.
+    // (drawn over Earth/DSO), matching the prior inline order. (ObserverMarker
+    // parents to the Earth group, not the scene root, so its order is irrelevant.)
     this.world.register(this.satellitesLayer);
     // Synchronous layers (all current ones) fully init in this call, so their
     // renderers are ready for InputManager / TrackingSource below.
@@ -93,6 +96,9 @@ export class Engine {
       renderer: this.renderer.instance,
       maxAnisotropy,
     });
+    // The observer marker rotates with the Earth — parent it to the (now-built)
+    // Earth group. Cross-layer wiring done by the Engine (layers never import layers).
+    this.observerMarkerLayer.setParent(this.earthLayer.group);
 
     // ── Navigation (camera state machine) ──────────────────────────────────────
     this.nav = new NavigationController(
@@ -199,7 +205,10 @@ export class Engine {
             onSelectionInvalidated: () =>
               useStore.getState().setSelectedSatellite(null, null),
             onTrailRefresh: () => this.refreshOrbitTrail(),
-            onObserverChange: (loc) => this.updateObserverMarker(loc),
+            onObserverChange: (loc) =>
+              this.world.runLayerCommand(this.observerMarkerLayer, 'setLocation', () =>
+                this.observerMarkerLayer.setLocation(loc),
+              ),
             onEnterObserverSky: (loc) => this.nav.focusCameraOnObserverSky(loc),
             onExitObserverSky: () => this.nav.resetCamera(),
           }),
@@ -459,68 +468,6 @@ export class Engine {
     this.renderer.render(this.scene, this.camera);
   };
 
-  private updateObserverMarker(loc: { lat: number; lon: number; alt: number } | null): void {
-    const earthGroup = this.earthLayer.group;
-    if (!earthGroup) return;
-    if (loc) {
-      if (!this.observerMarker) {
-        // Frustum: 160 degree FOV (half-angle 80deg). radius = height * tan(80)
-        // Shallow height=0.02. radiusTop = 0.02 * 5.67 = 0.1134
-        const geo = new THREE.CylinderGeometry(0.1134, 0.002, 0.02, 32, 1, true);
-        geo.translate(0, 0.01, 0); // Offset so base is at (0,0,0)
-
-        const mat = new THREE.MeshBasicMaterial({
-          color: 0x00e5ff,
-          transparent: true,
-          opacity: 0.35,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-          depthTest: true,
-        });
-
-        this.observerMarker = new THREE.Group();
-        earthGroup.add(this.observerMarker);
-
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.renderOrder = 1;
-        this.observerMarker.add(mesh);
-
-        // Add wireframe grid lines
-        const wireframe = new THREE.LineSegments(
-          new THREE.WireframeGeometry(geo),
-          new THREE.LineBasicMaterial({
-            color: 0xff4444, // Faint red
-            transparent: true,
-            opacity: 0.25,
-            depthTest: true,
-            depthWrite: false,
-          })
-        );
-        wireframe.renderOrder = 1;
-        this.observerMarker.add(wireframe);
-      }
-      const pos = getObserverECEFPosition(loc.lat, loc.lon, loc.alt);
-      this.observerMarker.position.copy(pos);
-
-      // Orient to surface normal
-      const normal = pos.clone().normalize();
-      this.observerMarker.quaternion.setFromUnitVectors(
-        new THREE.Vector3(0, 1, 0),
-        normal
-      );
-    } else if (this.observerMarker) {
-      earthGroup.remove(this.observerMarker);
-      this.observerMarker.traverse((child) => {
-        if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
-          child.geometry.dispose();
-          (child.material as THREE.Material).dispose();
-        }
-      });
-      this.observerMarker = null;
-    }
-  }
-
   private onResize = (): void => {
     const canvas = this.renderer.domElement;
     const width = canvas.clientWidth;
@@ -540,16 +487,6 @@ export class Engine {
     this.trailUnsub?.();
     this.inputManager?.dispose();
     window.removeEventListener('resize', this.onResize);
-    if (this.observerMarker) {
-      this.earthLayer.group?.remove(this.observerMarker);
-      this.observerMarker.traverse((child) => {
-        if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
-          child.geometry.dispose();
-          (child.material as THREE.Material).dispose();
-        }
-      });
-      this.observerMarker = null;
-    }
     // GPU picker references the satellite renderer's geometry — dispose it before
     // World disposes the SatellitesLayer.
     this.gpuPicker?.dispose();
