@@ -11,6 +11,7 @@ import dsoRouter, { summarizeDsoHealth } from './routes/dso.js';
 import { isCacheFresh, readVersion } from './cache/file-cache.js';
 import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { readDsoManifest } from './dso/snapshot/index.js';
+import { startDsoWorkerLoop } from './dso/worker/index.js';
 import { logger } from './utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,8 +23,47 @@ const isProd = process.env.NODE_ENV === 'production';
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-// Security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.)
-app.use(helmet());
+// Security headers — configured to allow the external resources the frontend needs:
+//   - blob: workers (Vite bundles Web Workers as blob URLs in production)
+//   - ESRI World Imagery tiles (server.arcgisonline.com)
+//   - NASA GIBS Black Marble tiles (gibs.earthdata.nasa.gov)
+//   - Takram atmosphere LUTs + STBN blue-noise (media.githubusercontent.com)
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: [
+          "'self'",
+          'data:',
+          'blob:',
+          'https://server.arcgisonline.com',
+          'https://services.arcgisonline.com',
+          'https://gibs.earthdata.nasa.gov',
+          'https://media.githubusercontent.com',
+        ],
+        connectSrc: [
+          "'self'",
+          'https://server.arcgisonline.com',
+          'https://services.arcgisonline.com',
+          'https://gibs.earthdata.nasa.gov',
+          'https://media.githubusercontent.com',
+        ],
+        workerSrc: ["'self'", 'blob:'],
+        childSrc: ["'self'", 'blob:'],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'self'"],
+        frameSrc: ["'none'"],
+      },
+    },
+    // Allow cross-origin requests for tile/texture resources embedded via Three.js
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  }),
+);
 
 // CORS — restrict to frontend domain in production, allow all in dev.
 const corsOrigin = process.env.CORS_ORIGIN
@@ -67,6 +107,17 @@ app.get('/health', async (_req, res) => {
 // ── Static frontend (production only) ────────────────────────────────────────
 if (isProd) {
   const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+
+  // Long cache for static textures (unhashed public/ copies — revalidate after 7 days)
+  app.use('/textures', express.static(path.join(frontendDist, 'textures'), {
+    maxAge: '7d',
+  }));
+  // Immutable caching for Vite content-hashed JS/CSS bundles
+  app.use('/assets', express.static(path.join(frontendDist, 'assets'), {
+    maxAge: '30d',
+    immutable: true,
+  }));
+
   app.use(express.static(frontendDist));
   app.get('*', (_req, res) => {
     res.sendFile(path.join(frontendDist, 'index.html'));
@@ -86,6 +137,25 @@ app.listen(PORT, () => {
   if (!needsImmediateFetch) {
     const version = readVersion();
     logger.info(`Serving cached data: ${version?.count} objects, version=${version?.version}`);
+  }
+
+  // ── DSO Worker (in-process) ────────────────────────────────────────────────
+  // In dev mode the DSO worker runs as a separate process via `concurrently`.
+  // In production we run it in the same process so Railway only needs one service.
+  if (isProd) {
+    const dsoWorker = startDsoWorkerLoop();
+    logger.info('DSO worker started in-process (production mode)');
+
+    const stopDso = (signal: string) => {
+      logger.info(`Received ${signal}; stopping DSO worker`);
+      dsoWorker.stop();
+    };
+    process.on('SIGINT', stopDso);
+    process.on('SIGTERM', stopDso);
+
+    dsoWorker.run.catch((error) => {
+      logger.error('DSO worker exited with an unrecoverable error:', error);
+    });
   }
 });
 
