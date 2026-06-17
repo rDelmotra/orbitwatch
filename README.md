@@ -1,4 +1,4 @@
-# Orbitwatch 🛰️
+# Orbitwatch
 
 > A personal notebook and interactive tool for joyriding satellites across the Earth.
 
