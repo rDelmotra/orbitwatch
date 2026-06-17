@@ -1,3 +1,4 @@
+import type * as THREE from 'three';
 import type { EnrichedTLEObject } from '../data/types';
 import type { ValidationReport } from '../store/devStore';
 import { useDevStore } from '../store/devStore';
@@ -10,6 +11,30 @@ export class DevValidation {
   private geoIndices: number[] = [];
   private lastTickTime = 0;
   private lastWorkerTickMs = 0;
+
+  /** Renderer for GPU/draw diagnostics (WebGLRenderer.info); null in non-GL contexts. */
+  private readonly renderer: THREE.WebGLRenderer | null;
+  /** Unmasked GPU string, read once and cached. */
+  private gpu: string | null = null;
+
+  constructor(renderer: THREE.WebGLRenderer | null = null) {
+    this.renderer = renderer;
+  }
+
+  /** Lazily reads the unmasked GPU renderer string once (WEBGL_debug_renderer_info). */
+  private readGpu(r: THREE.WebGLRenderer): string {
+    if (this.gpu !== null) return this.gpu;
+    try {
+      const gl = r.getContext();
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      this.gpu = ext
+        ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+        : 'unknown';
+    } catch {
+      this.gpu = 'unknown';
+    }
+    return this.gpu;
+  }
 
   // Frame timing ring buffer
   private frameTimes: Float64Array = new Float64Array(FRAME_SAMPLES);
@@ -104,6 +129,13 @@ export class DevValidation {
       workerTickMs: Math.round(this.lastWorkerTickMs),
       frameTimeMs: Math.round(frameTimeMs * 100) / 100,
       fps: Math.round(fps),
+      // renderer.info.render is reset per render(); read here (off the render loop) it
+      // reflects the most recently completed frame — fine for a ~1 Hz readout.
+      drawCalls: this.renderer?.info.render.calls ?? 0,
+      triangles: this.renderer?.info.render.triangles ?? 0,
+      textures: this.renderer?.info.memory.textures ?? 0,
+      geometries: this.renderer?.info.memory.geometries ?? 0,
+      gpu: this.renderer ? this.readGpu(this.renderer) : 'n/a',
     };
 
     useDevStore.getState().setReport(report);

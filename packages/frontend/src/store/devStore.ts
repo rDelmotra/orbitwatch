@@ -14,6 +14,12 @@ export interface ValidationReport {
   workerTickMs: number;
   frameTimeMs: number;
   fps: number;
+  // Renderer / GPU diagnostics (from WebGLRenderer.info)
+  drawCalls: number;
+  triangles: number;
+  textures: number;
+  geometries: number;
+  gpu: string;
 }
 
 interface DevState {
