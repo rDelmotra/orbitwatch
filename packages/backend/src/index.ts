@@ -23,7 +23,19 @@ const isProd = process.env.NODE_ENV === 'production';
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 // Security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.)
-app.use(helmet());
+// CSP extends helmet's defaults for the KTX2/Basis texture pipeline:
+//   - worker-src 'self' blob:  → KTX2Loader spawns its transcoder Web Worker from a blob: URL
+//   - script-src + 'wasm-unsafe-eval' → the Basis transcoder is WebAssembly (Chrome requires
+//     this directive to compile WASM). Same-origin .ktx2/.wasm fetches stay under default-src.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      'script-src': ["'self'", "'wasm-unsafe-eval'"],
+      'worker-src': ["'self'", 'blob:'],
+    },
+  },
+}));
 
 // CORS — restrict to frontend domain in production, allow all in dev.
 const corsOrigin = process.env.CORS_ORIGIN
