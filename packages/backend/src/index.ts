@@ -25,13 +25,17 @@ const isProd = process.env.NODE_ENV === 'production';
 // Security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.)
 // CSP extends helmet's defaults for the KTX2/Basis texture pipeline:
 //   - worker-src 'self' blob:  → KTX2Loader spawns its transcoder Web Worker from a blob: URL
-//   - script-src + 'wasm-unsafe-eval' → the Basis transcoder is WebAssembly (Chrome requires
-//     this directive to compile WASM). Same-origin .ktx2/.wasm fetches stay under default-src.
+//   - script-src + 'unsafe-eval' → the Basis transcoder is an Emscripten/embind WASM build that
+//     uses `new Function(...)` (craftInvokerFunction) to build its bindings, which needs full
+//     'unsafe-eval' (the narrower 'wasm-unsafe-eval' only allows WASM *compilation*). Blob
+//     workers inherit the document CSP and can't be given a narrower policy, so this applies
+//     app-wide — an accepted tradeoff for a public, auth-less 3D viewer. Same-origin
+//     .ktx2/.wasm fetches stay under default-src 'self'.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-      'script-src': ["'self'", "'wasm-unsafe-eval'"],
+      'script-src': ["'self'", "'unsafe-eval'"],
       'worker-src': ["'self'", 'blob:'],
     },
   },
