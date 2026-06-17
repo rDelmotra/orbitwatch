@@ -107,9 +107,11 @@ app.get('/health', async (_req, res) => {
 // ── Static frontend (production only) ────────────────────────────────────────
 if (isProd) {
   const frontendDist = path.resolve(__dirname, '../../frontend/dist');
-
-  // Long cache for static textures (unhashed public/ copies — revalidate after 7 days)
+  // Long cache for static textures and basis transcoder (unhashed public/ copies — revalidate after 7 days)
   app.use('/textures', express.static(path.join(frontendDist, 'textures'), {
+    maxAge: '7d',
+  }));
+  app.use('/basis', express.static(path.join(frontendDist, 'basis'), {
     maxAge: '7d',
   }));
   // Immutable caching for Vite content-hashed JS/CSS bundles
