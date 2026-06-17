@@ -85,9 +85,11 @@ if (isProd) {
   const frontendDist = path.resolve(__dirname, '../../frontend/dist');
   app.use(express.static(frontendDist, {
     setHeaders: (res, filePath) => {
-      // Long-cache the static GPU textures + Basis transcoder. Filenames are not
-      // content-hashed, so cache-bust by renaming when a texture is swapped.
-      if (filePath.includes('/textures/') || filePath.includes('/basis/')) {
+      if (filePath.includes('/textures/')) {
+        // .ktx2 filenames are content-hashed (earth-*.<hash>.ktx2) → cache forever.
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else if (filePath.includes('/basis/')) {
+        // Basis transcoder isn't hashed but is stable (ships with three) — cache a week.
         res.setHeader('Cache-Control', 'public, max-age=604800');
       }
     },
