@@ -28,12 +28,16 @@ const isProd = process.env.NODE_ENV === 'production';
 //   - ESRI World Imagery tiles (server.arcgisonline.com)
 //   - NASA GIBS Black Marble tiles (gibs.earthdata.nasa.gov)
 //   - Takram atmosphere LUTs + STBN blue-noise (media.githubusercontent.com)
+// CSP extends helmet's defaults for the KTX2/Basis texture pipeline:
+//   - worker-src 'self' blob:  → KTX2Loader spawns its transcoder Web Worker from a blob: URL
+//   - script-src + 'wasm-unsafe-eval' → the Basis transcoder is WebAssembly (Chrome requires
+//     this directive to compile WASM).
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
+        scriptSrc: ["'self'", "'wasm-unsafe-eval'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: [
           "'self'",
