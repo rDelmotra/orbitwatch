@@ -96,6 +96,26 @@ function ReportView({ r }: { r: ValidationReport }) {
         value={String(r.fps)}
         color={r.fps < 30 ? fail : r.fps < 55 ? warn : ok}
       />
+
+      <Divider />
+
+      <Row label="Draw calls" value={r.drawCalls.toLocaleString()} />
+      <Row label="Triangles" value={r.triangles.toLocaleString()} />
+      <Row label="Textures" value={String(r.textures)} />
+      <Row label="Geometries" value={String(r.geometries)} />
+      <div
+        style={{
+          marginTop: 4,
+          color: 'rgba(255,255,255,0.4)',
+          fontSize: '10px',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+        title={r.gpu}
+      >
+        {r.gpu}
+      </div>
     </>
   );
 }
