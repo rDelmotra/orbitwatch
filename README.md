@@ -2,7 +2,13 @@
 
 > A personal notebook and interactive tool for joyriding satellites across the Earth.
 
-[**Insert Video Here: Joyriding a satellite over Earth**]
+
+
+https://github.com/user-attachments/assets/493d584e-78a1-4aba-9ff1-a8c53745451e
+
+
+
+
 
 ## Overview
 
