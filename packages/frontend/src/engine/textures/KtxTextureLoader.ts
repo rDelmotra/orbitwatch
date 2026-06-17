@@ -20,6 +20,9 @@ export class KtxTextureLoader {
   private readonly maxAnisotropy: number;
   private readonly loaded: THREE.Texture[] = [];
   private disposed = false;
+  private pending = 0;
+  private releaseRequested = false;
+  private workersReleased = false;
 
   constructor(
     renderer: THREE.WebGLRenderer,
@@ -42,9 +45,11 @@ export class KtxTextureLoader {
     colorSpace: THREE.ColorSpace,
     onLoad: (tex: THREE.Texture) => void,
   ): void {
+    this.pending++;
     this.loader.load(
       path,
       (tex) => {
+        this.pending--;
         // A transcode can finish after dispose() (async). Don't touch disposed uniforms
         // or leak the late texture — free it immediately and skip the callback.
         if (this.disposed) {
@@ -56,12 +61,33 @@ export class KtxTextureLoader {
         tex.needsUpdate = true;
         this.loaded.push(tex);
         onLoad(tex);
+        this.maybeReleaseWorkers();
       },
       undefined,
       (err) => {
+        this.pending--;
         console.error(`[KtxTextureLoader] failed to load ${path}`, err);
+        this.maybeReleaseWorkers();
       },
     );
+  }
+
+  /**
+   * Terminate the transcoder worker pool once all in-flight loads finish — frees the
+   * worker threads + Basis WASM. The already-loaded textures stay valid (three's
+   * `KTX2Loader.dispose()` only tears down the pool, not the textures). Call this after
+   * kicking off all loads for a one-shot texture set (e.g. the Earth maps).
+   */
+  releaseWorkersWhenIdle(): void {
+    this.releaseRequested = true;
+    this.maybeReleaseWorkers();
+  }
+
+  private maybeReleaseWorkers(): void {
+    if (this.releaseRequested && !this.workersReleased && !this.disposed && this.pending === 0) {
+      this.loader.dispose();
+      this.workersReleased = true;
+    }
   }
 
   /** Disposes every loaded texture AND the loader's transcoder worker pool. Any
@@ -70,6 +96,6 @@ export class KtxTextureLoader {
     this.disposed = true;
     for (const tex of this.loaded) tex.dispose();
     this.loaded.length = 0;
-    this.loader.dispose();
+    if (!this.workersReleased) this.loader.dispose();
   }
 }

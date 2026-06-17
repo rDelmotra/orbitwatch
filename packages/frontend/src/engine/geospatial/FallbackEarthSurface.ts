@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three';
 import { KtxTextureLoader } from '../textures/KtxTextureLoader';
+import { TEXTURE_URLS } from '../textures/texture-manifest';
 
 const ATM_INNER_RADIUS = 1.0;
 const ATM_OUTER_RADIUS = 1.12;
@@ -324,13 +325,13 @@ export class FallbackEarthSurface {
       fragmentShader: EARTH_FRAG,
     });
 
-    load('/textures/earth-diffuse-8k.ktx2', THREE.SRGBColorSpace,
+    load(TEXTURE_URLS['earth-diffuse-8k'], THREE.SRGBColorSpace,
       (t) => { this._earthMat.uniforms.uDayMap.value = t; });
-    load('/textures/earth-night-4k.ktx2', THREE.SRGBColorSpace,
+    load(TEXTURE_URLS['earth-night-4k'], THREE.SRGBColorSpace,
       (t) => { this._earthMat.uniforms.uNightMap.value = t; });
-    load('/textures/earth-bump-4k.ktx2', THREE.LinearSRGBColorSpace,
+    load(TEXTURE_URLS['earth-bump-4k'], THREE.LinearSRGBColorSpace,
       (t) => { this._earthMat.uniforms.uNormalMap.value = t; });
-    load('/textures/earth-specular-4k.ktx2', THREE.LinearSRGBColorSpace,
+    load(TEXTURE_URLS['earth-specular-4k'], THREE.LinearSRGBColorSpace,
       (t) => { this._earthMat.uniforms.uSpecularMap.value = t; });
 
     this._earthMesh = new THREE.Mesh(new THREE.SphereGeometry(1.0, 128, 64), this._earthMat);
@@ -348,8 +349,11 @@ export class FallbackEarthSurface {
       depthWrite: false,
     });
 
-    load('/textures/earth-clouds-4k.ktx2', THREE.LinearSRGBColorSpace,
+    load(TEXTURE_URLS['earth-clouds-4k'], THREE.LinearSRGBColorSpace,
       (t) => { this._cloudMat.uniforms.uCloudMap.value = t; });
+
+    // One-shot load — release the transcoder worker pool once these finish.
+    this._ktx.releaseWorkersWhenIdle();
 
     this._cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(1.004, 64, 32), this._cloudMat);
     earthGroup.add(this._cloudMesh);
