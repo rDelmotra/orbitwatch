@@ -67,7 +67,15 @@ app.get('/health', async (_req, res) => {
 // ── Static frontend (production only) ────────────────────────────────────────
 if (isProd) {
   const frontendDist = path.resolve(__dirname, '../../frontend/dist');
-  app.use(express.static(frontendDist));
+  app.use(express.static(frontendDist, {
+    setHeaders: (res, filePath) => {
+      // Long-cache the static GPU textures + Basis transcoder. Filenames are not
+      // content-hashed, so cache-bust by renaming when a texture is swapped.
+      if (filePath.includes('/textures/') || filePath.includes('/basis/')) {
+        res.setHeader('Cache-Control', 'public, max-age=604800');
+      }
+    },
+  }));
   app.get('*', (_req, res) => {
     res.sendFile(path.join(frontendDist, 'index.html'));
   });
