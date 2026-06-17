@@ -8,6 +8,7 @@
  * No async steps — ready = true immediately.
  */
 import * as THREE from 'three';
+import { KtxTextureLoader } from '../textures/KtxTextureLoader';
 
 const ATM_INNER_RADIUS = 1.0;
 const ATM_OUTER_RADIUS = 1.12;
@@ -286,20 +287,24 @@ export class FallbackEarthSurface {
   /** Scratch vector for atmosphere camera-position uniform. */
   private readonly _atmosphereCameraPos = new THREE.Vector3();
 
-  constructor(earthGroup: THREE.Group, maxAnisotropy: number, camera: THREE.Camera) {
-    const loader = new THREE.TextureLoader();
+  /** Owns the KTX2 transcoder + loaded compressed textures (freed in dispose()). */
+  private readonly _ktx: KtxTextureLoader;
+  /** 1×1 placeholders shown until KTX2 textures arrive; freed in dispose(). */
+  private readonly _placeholders: THREE.DataTexture[] = [];
 
-    const load = (
-      path: string,
-      colorSpace: THREE.ColorSpace,
-      onLoad: (t: THREE.Texture) => void,
-    ): void => {
-      loader.load(path, (tex) => {
-        tex.colorSpace = colorSpace;
-        tex.anisotropy = maxAnisotropy;
-        tex.needsUpdate = true;
-        onLoad(tex);
-      });
+  constructor(
+    earthGroup: THREE.Group,
+    maxAnisotropy: number,
+    camera: THREE.Camera,
+    renderer: THREE.WebGLRenderer,
+  ) {
+    this._ktx = new KtxTextureLoader(renderer, maxAnisotropy);
+    const load = this._ktx.load.bind(this._ktx);
+
+    const px = (r: number, g: number, b: number, a = 255): THREE.DataTexture => {
+      const t = makePixel(r, g, b, a);
+      this._placeholders.push(t);
+      return t;
     };
 
     const initCamPos = camera.position.clone();
@@ -308,10 +313,10 @@ export class FallbackEarthSurface {
     // ── Earth surface ─────────────────────────────────────────────────────────
     this._earthMat = new THREE.ShaderMaterial({
       uniforms: {
-        uDayMap:      { value: makePixel(80, 120, 180) },
-        uNightMap:    { value: makePixel(0, 0, 0) },
-        uNormalMap:   { value: makePixel(128, 128, 255) },
-        uSpecularMap: { value: makePixel(0, 0, 0) },
+        uDayMap:      { value: px(80, 120, 180) },
+        uNightMap:    { value: px(0, 0, 0) },
+        uNormalMap:   { value: px(128, 128, 255) },
+        uSpecularMap: { value: px(0, 0, 0) },
         uSunDirection: { value: new THREE.Vector3(1, 0, 0) },
         uCameraPos:   { value: initCamPos.clone() },
       },
@@ -319,13 +324,13 @@ export class FallbackEarthSurface {
       fragmentShader: EARTH_FRAG,
     });
 
-    load('/textures/earth-diffuse-8k.jpg', THREE.SRGBColorSpace,
+    load('/textures/earth-diffuse-8k.ktx2', THREE.SRGBColorSpace,
       (t) => { this._earthMat.uniforms.uDayMap.value = t; });
-    load('/textures/earth-night-4k.jpg', THREE.SRGBColorSpace,
+    load('/textures/earth-night-4k.ktx2', THREE.SRGBColorSpace,
       (t) => { this._earthMat.uniforms.uNightMap.value = t; });
-    load('/textures/earth-bump-4k.jpg', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-bump-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this._earthMat.uniforms.uNormalMap.value = t; });
-    load('/textures/earth-specular-4k.jpg', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-specular-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this._earthMat.uniforms.uSpecularMap.value = t; });
 
     this._earthMesh = new THREE.Mesh(new THREE.SphereGeometry(1.0, 128, 64), this._earthMat);
@@ -334,7 +339,7 @@ export class FallbackEarthSurface {
     // ── Cloud layer ───────────────────────────────────────────────────────────
     this._cloudMat = new THREE.ShaderMaterial({
       uniforms: {
-        uCloudMap:    { value: makePixel(255, 255, 255, 0) },
+        uCloudMap:    { value: px(255, 255, 255, 0) },
         uSunDirection: { value: new THREE.Vector3(1, 0, 0) },
       },
       vertexShader: CLOUD_VERT,
@@ -343,7 +348,7 @@ export class FallbackEarthSurface {
       depthWrite: false,
     });
 
-    load('/textures/earth-clouds-4k.png', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-clouds-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this._cloudMat.uniforms.uCloudMap.value = t; });
 
     this._cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(1.004, 64, 32), this._cloudMat);
@@ -406,5 +411,9 @@ export class FallbackEarthSurface {
     this._cloudMat.dispose();
     this._atmosphereMesh.geometry.dispose();
     this._atmosphereMat.dispose();
+    // Material.dispose() does not free uniform textures — do it explicitly.
+    this._ktx.dispose();
+    for (const t of this._placeholders) t.dispose();
+    this._placeholders.length = 0;
   }
 }

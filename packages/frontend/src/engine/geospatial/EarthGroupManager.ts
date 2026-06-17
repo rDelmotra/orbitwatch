@@ -99,7 +99,7 @@ export class EarthGroupManager {
     this._maxAnisotropy = maxAnisotropy;
 
     this._bridge = new CoordinateBridge();
-    this._fallback = new FallbackEarthSurface(this.object, maxAnisotropy, camera);
+    this._fallback = new FallbackEarthSurface(this.object, maxAnisotropy, camera, renderer);
 
     // Streaming imagery surface (replaces the fallback sphere when tiles load).
     this._modules.push(new TileEarthSurface());
