@@ -58,7 +58,7 @@ export class EarthGroupManager {
     this._maxAnisotropy = maxAnisotropy;
 
     this._bridge = new CoordinateBridge();
-    this._fallback = new FallbackEarthSurface(this.object, maxAnisotropy, camera);
+    this._fallback = new FallbackEarthSurface(this.object, maxAnisotropy, camera, renderer);
   }
 
   /**

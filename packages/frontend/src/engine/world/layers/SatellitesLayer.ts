@@ -56,7 +56,7 @@ export class SatellitesLayer implements Layer {
   init(ctx: LayerContext): void {
     this._renderer = new SatelliteRenderer(ctx.scene);
     if (import.meta.env.DEV) {
-      this.devValidation = new DevValidation();
+      this.devValidation = new DevValidation(ctx.renderer);
     }
   }
 

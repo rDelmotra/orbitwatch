@@ -15,6 +15,7 @@
  * One draw call replaces the previous 148-shell stack.
  */
 import * as THREE from 'three';
+import { KtxTextureLoader } from './textures/KtxTextureLoader';
 
 const ATM_INNER_RADIUS = 1.0;   // start at the planet surface
 const ATM_OUTER_RADIUS = 1.12;  // extend well out for visible limb glow
@@ -322,26 +323,27 @@ export class EarthRenderer {
   private readonly cloudMat: THREE.ShaderMaterial;
   private readonly atmosphereMat: THREE.ShaderMaterial;
 
+  /** Owns the KTX2 transcoder + the loaded compressed textures (disposed in dispose()). */
+  private readonly ktx: KtxTextureLoader;
+  /** 1×1 placeholders shown until KTX2 textures arrive; tracked so dispose() frees them. */
+  private readonly placeholders: THREE.DataTexture[] = [];
+
   constructor(
     maxAnisotropy: number,
-    _renderer: THREE.WebGLRenderer,
+    renderer: THREE.WebGLRenderer,
     camera: THREE.Camera,
   ) {
     this.object = new THREE.Group();
 
-    const loader = new THREE.TextureLoader();
+    this.ktx = new KtxTextureLoader(renderer, maxAnisotropy);
+    const load = this.ktx.load.bind(this.ktx);
 
-    const load = (
-      path: string,
-      colorSpace: THREE.ColorSpace,
-      onLoad: (t: THREE.Texture) => void,
-    ): void => {
-      loader.load(path, (tex) => {
-        tex.colorSpace = colorSpace;
-        tex.anisotropy = maxAnisotropy;
-        tex.needsUpdate = true;
-        onLoad(tex);
-      });
+    // 1×1 placeholder shown until the corresponding KTX2 texture finishes transcoding.
+    // Tracked in `placeholders` so dispose() can free them (Material.dispose() won't).
+    const px = (r: number, g: number, b: number, a = 255): THREE.DataTexture => {
+      const t = makePixel(r, g, b, a);
+      this.placeholders.push(t);
+      return t;
     };
 
     const initCamPos = camera.position.clone();
@@ -350,10 +352,10 @@ export class EarthRenderer {
     // ── Earth surface ───────────────────────────────────────────────────────
     this.earthMat = new THREE.ShaderMaterial({
       uniforms: {
-        uDayMap: { value: makePixel(80, 120, 180) },
-        uNightMap: { value: makePixel(0, 0, 0) },
-        uNormalMap: { value: makePixel(128, 128, 255) },
-        uSpecularMap: { value: makePixel(0, 0, 0) },
+        uDayMap: { value: px(80, 120, 180) },
+        uNightMap: { value: px(0, 0, 0) },
+        uNormalMap: { value: px(128, 128, 255) },
+        uSpecularMap: { value: px(0, 0, 0) },
         uSunDirection: { value: this.sunDirection.clone() },
         uCameraPos: { value: initCamPos.clone() },
       },
@@ -361,13 +363,13 @@ export class EarthRenderer {
       fragmentShader: EARTH_FRAG,
     });
 
-    load('/textures/earth-diffuse-8k.jpg', THREE.SRGBColorSpace,
+    load('/textures/earth-diffuse-8k.ktx2', THREE.SRGBColorSpace,
       (t) => { this.earthMat.uniforms.uDayMap.value = t; });
-    load('/textures/earth-night-4k.jpg', THREE.SRGBColorSpace,
+    load('/textures/earth-night-4k.ktx2', THREE.SRGBColorSpace,
       (t) => { this.earthMat.uniforms.uNightMap.value = t; });
-    load('/textures/earth-bump-4k.jpg', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-bump-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this.earthMat.uniforms.uNormalMap.value = t; });
-    load('/textures/earth-specular-4k.jpg', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-specular-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this.earthMat.uniforms.uSpecularMap.value = t; });
 
     const earthGeo = new THREE.SphereGeometry(1.0, 128, 64);
@@ -376,7 +378,7 @@ export class EarthRenderer {
     // ── Cloud layer ─────────────────────────────────────────────────────────
     this.cloudMat = new THREE.ShaderMaterial({
       uniforms: {
-        uCloudMap: { value: makePixel(255, 255, 255, 0) },
+        uCloudMap: { value: px(255, 255, 255, 0) },
         uSunDirection: { value: this.sunDirection.clone() },
       },
       vertexShader: CLOUD_VERT,
@@ -385,7 +387,7 @@ export class EarthRenderer {
       depthWrite: false,
     });
 
-    load('/textures/earth-clouds-4k.png', THREE.LinearSRGBColorSpace,
+    load('/textures/earth-clouds-4k.ktx2', THREE.LinearSRGBColorSpace,
       (t) => { this.cloudMat.uniforms.uCloudMap.value = t; });
 
     const cloudGeo = new THREE.SphereGeometry(1.004, 64, 32);
@@ -444,5 +446,9 @@ export class EarthRenderer {
         (obj.material as THREE.Material).dispose();
       }
     });
+    // Material.dispose() does not free textures held in uniforms — do it explicitly.
+    this.ktx.dispose();                          // loaded CompressedTextures + transcoder pool
+    for (const t of this.placeholders) t.dispose(); // 1×1 placeholders
+    this.placeholders.length = 0;
   }
 }
