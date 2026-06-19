@@ -19,15 +19,21 @@ export function LoadingScreen() {
   const loadingPhase = useStore((s) => s.loadingPhase);
   const loadingError = useStore((s) => s.loadingError);
   const [visible, setVisible] = useState(true);
-  const [fading, setFading] = useState(false);
 
   useEffect(() => {
-    if (loadingPhase === 'ready') {
-      setFading(true);
-      const timer = setTimeout(() => setVisible(false), 1000);
-      return () => clearTimeout(timer);
+    // A critical failure — even one that happens AFTER the app loaded — must
+    // re-assert the overlay so the error is never invisible behind an unmounted
+    // loading screen.
+    if (loadingError) {
+      setVisible(true);
+      return;
     }
-  }, [loadingPhase]);
+    if (loadingPhase === 'ready') {
+      // Scene is already rendered behind the overlay — drop it immediately,
+      // no fade (the 1s fade was pure perceived-load tax).
+      setVisible(false);
+    }
+  }, [loadingPhase, loadingError]);
 
   if (!visible) return null;
 
@@ -44,9 +50,6 @@ export function LoadingScreen() {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        opacity: fading ? 0 : 1,
-        transition: 'opacity 1s ease-out',
-        pointerEvents: fading ? 'none' : 'auto',
       }}
     >
       <h1
