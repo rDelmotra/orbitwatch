@@ -12,4 +12,5 @@ https://github.com/user-attachments/assets/493d584e-78a1-4aba-9ff1-a8c53745451e
 
 ## Overview
 
-Orbitwatch began as a passion project—a digital notebook designed to document and visualize the intricate dance of satellites in low Earth orbit. It is built for those who look up and wonder what's looking down, offering a sleek interface to track, follow, and "joyride" along satellite trajectories in real-time.
+Orbitwatch will offer a live view of the planet and its surroundings—from satellites and orbital debris to cloud formations, atmospheric conditions, and geomagnetic activity. Way to follow the movements and systems that shape the space around earth.
+
