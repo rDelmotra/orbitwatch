@@ -92,6 +92,11 @@ if (isProd) {
       } else if (filePath.includes('/basis/')) {
         // Basis transcoder isn't hashed but is stable (ships with three) — cache a week.
         res.setHeader('Cache-Control', 'public, max-age=604800');
+      } else if (filePath.endsWith('/sw.js')) {
+        // Never HTTP-cache the Service Worker script itself, so updated versions are
+        // picked up promptly. Service-Worker-Allowed lets it claim root scope.
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Service-Worker-Allowed', '/');
       }
     },
   }));
