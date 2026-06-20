@@ -3,6 +3,7 @@ import { fetchFromSpaceTrack } from '../services/spacetrack.js';
 import { fetchCelesTrakTLEs } from '../services/celestrak.js';
 import { classifyObject } from '../services/classifier.js';
 import { writeCache, readCache, isCacheFresh } from '../cache/file-cache.js';
+import { primeTlePayload } from '../cache/tle-payload-cache.js';
 import {
   EnrichedTLEObject,
   SpaceTrackGPElement,
@@ -209,6 +210,9 @@ export async function runUpdateCycle(): Promise<void> {
   }
 
   writeCache(enriched);
+  // Re-warm the in-memory gzipped /api/tle/all payload in-process so the next
+  // request serves from memory instead of paying the one-time rebuild.
+  primeTlePayload();
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   logger.info(
     `TLE update complete: ${enriched.length} objects from ${source} in ${elapsed}s`,

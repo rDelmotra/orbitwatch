@@ -90,6 +90,25 @@ export function readCache(): EnrichedTLEObject[] | null {
 }
 
 /**
+ * Read the raw TLE cache file as a UTF-8 string WITHOUT parsing it.
+ *
+ * The file on disk is already a JSON array, so the in-memory payload cache can
+ * splice it into the response envelope by string concat — avoiding the 13.8 MB
+ * JSON.parse → JSON.stringify roundtrip the per-request handler used to pay.
+ * Returns null if the file doesn't exist or is unreadable.
+ */
+export function readRawTleCache(): string | null {
+  const p = tleCachePath();
+  if (!fs.existsSync(p)) return null;
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch (err) {
+    logger.error('Failed to read raw TLE cache:', err);
+    return null;
+  }
+}
+
+/**
  * Read the version metadata from disk.
  * Returns null if the file doesn't exist.
  */

@@ -7,6 +7,7 @@ import {
   writeVisualCache,
 } from '../cache/file-cache.js';
 import type { VisualNoradCache } from '../cache/file-cache.js';
+import { getTlePayload } from '../cache/tle-payload-cache.js';
 import { fetchCelesTrakVisualNoradIds } from '../services/celestrak-visual.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -67,8 +68,11 @@ function sendVisualResponse(
 // fetch cycle completes).
 // ============================================================
 router.get('/all', (req: Request, res: Response) => {
-  const version = readVersion();
-  if (!version) {
+  // The response body is built once per data version and held pre-gzipped in
+  // memory; the hot path is a version compare + a buffer write (no 13.8 MB
+  // read/parse/stringify/gzip per request).
+  const payload = getTlePayload();
+  if (!payload) {
     logger.warn('GET /api/tle/all: no cache available yet');
     res.status(503).json({ error: 'Data not yet available. Try again in a few seconds.' });
     return;
@@ -76,21 +80,32 @@ router.get('/all', (req: Request, res: Response) => {
 
   // Support conditional GET: if the client's ETag matches the current version,
   // skip sending the body and return 304 Not Modified.
-  const etag = `"${version.version}"`;
-  if (req.headers['if-none-match'] === etag) {
+  if (req.headers['if-none-match'] === payload.etag) {
     res.status(304).end();
     return;
   }
 
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.setHeader('ETag', payload.etag);
+  res.setHeader('Vary', 'Accept-Encoding');
+
+  if (req.acceptsEncodings(['gzip'])) {
+    // Serve the pre-gzipped buffer directly. compression() skips re-encoding
+    // because Content-Encoding is already set (non-identity).
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', payload.gzip.length);
+    res.end(payload.gzip);
+    return;
+  }
+
+  // Rare client without gzip support — fall back to the parse + serialize path.
   const data = readCache();
   if (!data) {
     res.status(503).json({ error: 'Cache read error. Try again shortly.' });
     return;
   }
-
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.setHeader('ETag', etag);
-  res.json({ version: version.version, count: data.length, data });
+  res.json({ version: payload.version, count: payload.count, data });
 });
 
 // ============================================================

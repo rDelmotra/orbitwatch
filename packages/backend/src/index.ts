@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import tleRouter from './routes/tle.js';
 import dsoRouter, { summarizeDsoHealth } from './routes/dso.js';
 import { isCacheFresh, readVersion } from './cache/file-cache.js';
+import { primeTlePayload } from './cache/tle-payload-cache.js';
 import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { readDsoManifest } from './dso/snapshot/index.js';
 import { startDsoWorkerLoop } from './dso/worker/index.js';
@@ -147,6 +148,10 @@ app.listen(PORT, () => {
   if (!needsImmediateFetch) {
     const version = readVersion();
     logger.info(`Serving cached data: ${version?.count} objects, version=${version?.version}`);
+    // Cache is fresh at boot — warm the in-memory gzipped payload now so the
+    // first /api/tle/all request doesn't pay the one-time rebuild. (The
+    // immediate-fetch path warms via the cron updater after writeCache.)
+    primeTlePayload();
   }
 
   // ── DSO Worker (in-process) ────────────────────────────────────────────────
