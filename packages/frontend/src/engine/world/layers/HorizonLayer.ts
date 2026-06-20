@@ -7,17 +7,34 @@ type ObserverLoc = { lat: number; lon: number; alt: number };
 
 /** Tangent-plane radius of the ground disc / horizon ring, in Earth radii. */
 const GROUND_RADIUS_ER = 0.2;
+/** Cardinal-label ring radius + how far they hover above the horizon plane. */
+const LABEL_RADIUS_ER = GROUND_RADIUS_ER;
+const LABEL_LIFT_ER = 0.01;
+const LABEL_SCALE_ER = 0.0175;
+
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
+/**
+ * Earth's spin axis (celestial north pole) in the Earth-group / ECEF-scene frame:
+ * ECEF +Z = (0,0,1) maps through the `frames.ts` swap `(x,z,-y)` → (0,1,0). The
+ * horizon parents to the rotating Earth group, so the cardinal directions are
+ * computed in this (GAST-free) frame and ride the group's rotation.
+ */
+const SPIN_AXIS = new THREE.Vector3(0, 1, 0);
+
+const CARDINAL_NORTH = '#ff6b4a'; // North stands out (warm) for instant orientation
+const CARDINAL_OTHER = '#8fe3ff';
 
 /**
- * The sky-dome ground reference — a translucent ground disc + bright horizon ring
- * pinned at the observer, giving the planetarium view a "standing on the Earth"
- * frame. Visible **only in dome mode**. Modeled on {@link ObserverMarkerLayer}:
- * parents to the rotating Earth group (so it tracks geography via GAST), builds
- * lazily when a location is set, and disposes its own GL. Non-critical.
+ * The sky-dome ground reference — a translucent ground disc + bright horizon ring +
+ * N/E/S/W cardinal labels, pinned at the observer, giving the planetarium view a
+ * "standing on the Earth, facing a direction" frame. Visible **only in dome mode**.
+ * Modeled on {@link ObserverMarkerLayer}: parents to the rotating Earth group (so it
+ * tracks geography via GAST), builds lazily, and disposes its own GL. Non-critical.
  *
- * Sits at the observer's surface point (no lift offset) so it coincides with the
- * dome camera's eye plane. Cardinal-direction labels are deferred to Phase 2.
+ * Structure: an identity-transformed container holds (a) a `surface` sub-group (disc
+ * + ring, oriented +Y → local up) and (b) four billboard letter sprites placed at the
+ * true ENU cardinal directions. Sits at the observer's surface point (no lift) so it
+ * coincides with the dome camera's eye plane.
  */
 export class HorizonLayer implements Layer {
   readonly name = 'horizon';
@@ -25,10 +42,12 @@ export class HorizonLayer implements Layer {
 
   private parent: THREE.Object3D | null = null;
   private group: THREE.Group | null = null;
+  private surface: THREE.Group | null = null;
+  /** N, E, S, W sprites — placed each setLocation along the ENU cardinals. */
+  private labels: THREE.Sprite[] = [];
 
   init(_ctx: LayerContext): void {
-    // No scene-root object: parents to the Earth group (via setParent), built
-    // lazily in setLocation().
+    // No scene-root object: parents to the Earth group (via setParent), built lazily.
   }
 
   /** Engine wires the rotating Earth group as the parent (cross-layer). */
@@ -40,19 +59,41 @@ export class HorizonLayer implements Layer {
   setLocation(loc: ObserverLoc | null): void {
     if (!this.parent) return;
 
-    if (loc) {
-      if (!this.group) {
-        this.group = this.build();
-        this.group.visible = useStore.getState().visibilityMode === 'dome';
-        this.parent.add(this.group);
-      }
-      // surfaceOffset = 0: sit at the surface, level with the dome camera's eye.
-      const pos = getObserverECEFPosition(loc.lat, loc.lon, loc.alt, 0);
-      this.group.position.copy(pos);
-      this.group.quaternion.setFromUnitVectors(LOCAL_UP, pos.clone().normalize());
-    } else if (this.group) {
+    if (!loc) {
       this.remove();
+      return;
     }
+
+    if (!this.group) {
+      this.build();
+      this.group!.visible = useStore.getState().visibilityMode === 'dome';
+      this.parent.add(this.group!);
+    }
+
+    // surfaceOffset = 0: sit at the surface, level with the dome camera's eye.
+    const p = getObserverECEFPosition(loc.lat, loc.lon, loc.alt, 0);
+    const up = p.clone().normalize();
+
+    // Local East-North-Up basis (Earth-group frame). East ⟂ {spin axis, up}.
+    const east = new THREE.Vector3().crossVectors(SPIN_AXIS, up);
+    if (east.lengthSq() < 1e-8) east.set(1, 0, 0); // observer at a pole
+    east.normalize();
+    const north = new THREE.Vector3().crossVectors(up, east).normalize();
+
+    // Disc + ring: at the surface, +Y aligned to the local normal.
+    this.surface!.position.copy(p);
+    this.surface!.quaternion.setFromUnitVectors(LOCAL_UP, up);
+
+    // Cardinal labels at true N / E / S / W, hovering just above the horizon plane.
+    const place = (sprite: THREE.Sprite, dir: THREE.Vector3) => {
+      sprite.position.copy(p)
+        .addScaledVector(dir, LABEL_RADIUS_ER)
+        .addScaledVector(up, LABEL_LIFT_ER);
+    };
+    place(this.labels[0], north);
+    place(this.labels[1], east);
+    place(this.labels[2], north.clone().negate());
+    place(this.labels[3], east.clone().negate());
   }
 
   update(_frame: FrameContext): void {
@@ -67,8 +108,10 @@ export class HorizonLayer implements Layer {
     this.parent = null;
   }
 
-  private build(): THREE.Group {
+  private build(): void {
     const group = new THREE.Group();
+
+    const surface = new THREE.Group();
 
     // Ground disc — dark + translucent so the lower hemisphere reads as ground.
     const discGeo = new THREE.CircleGeometry(GROUND_RADIUS_ER, 96);
@@ -83,7 +126,7 @@ export class HorizonLayer implements Layer {
     });
     const disc = new THREE.Mesh(discGeo, discMat);
     disc.renderOrder = 0;
-    group.add(disc);
+    surface.add(disc);
 
     // Horizon ring — a bright rim marking the horizon line.
     const ringGeo = new THREE.RingGeometry(GROUND_RADIUS_ER * 0.985, GROUND_RADIUS_ER, 96);
@@ -99,9 +142,21 @@ export class HorizonLayer implements Layer {
     });
     const ring = new THREE.Mesh(ringGeo, ringMat);
     ring.renderOrder = 1;
-    group.add(ring);
+    surface.add(ring);
 
-    return group;
+    group.add(surface);
+
+    const labels = [
+      makeLabelSprite('N', CARDINAL_NORTH),
+      makeLabelSprite('E', CARDINAL_OTHER),
+      makeLabelSprite('S', CARDINAL_OTHER),
+      makeLabelSprite('W', CARDINAL_OTHER),
+    ];
+    for (const sprite of labels) group.add(sprite);
+
+    this.group = group;
+    this.surface = surface;
+    this.labels = labels;
   }
 
   private remove(): void {
@@ -111,8 +166,44 @@ export class HorizonLayer implements Layer {
       if (child instanceof THREE.Mesh) {
         child.geometry.dispose();
         (child.material as THREE.Material).dispose();
+      } else if (child instanceof THREE.Sprite) {
+        const mat = child.material as THREE.SpriteMaterial;
+        mat.map?.dispose();
+        mat.dispose();
       }
     });
     this.group = null;
+    this.surface = null;
+    this.labels = [];
   }
+}
+
+/** A camera-facing letter label backed by a small canvas texture. */
+function makeLabelSprite(letter: string, color: string): THREE.Sprite {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 44px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.9)';
+  ctx.shadowBlur = 6;
+  ctx.fillText(letter, size / 2, size / 2 + 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(LABEL_SCALE_ER, LABEL_SCALE_ER, 1);
+  sprite.renderOrder = 2;
+  return sprite;
 }
