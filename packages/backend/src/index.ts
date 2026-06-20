@@ -129,7 +129,17 @@ if (isProd) {
     immutable: true,
   }));
 
-  app.use(express.static(frontendDist));
+  // Root static (index.html, favicon, sw.js). The Service Worker script must not be
+  // HTTP-cached so updates are picked up promptly; Service-Worker-Allowed lets it
+  // claim root scope.
+  app.use(express.static(frontendDist, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('/sw.js')) {
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Service-Worker-Allowed', '/');
+      }
+    },
+  }));
   app.get('*', (_req, res) => {
     res.sendFile(path.join(frontendDist, 'index.html'));
   });
