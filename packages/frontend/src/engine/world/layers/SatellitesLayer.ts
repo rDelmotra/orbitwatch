@@ -5,7 +5,7 @@ import { Sgp4WorkerClient, type Sgp4PositionResult } from '../../tle/Sgp4WorkerC
 import { getSunDirection } from '../../../orbital/time';
 import { getObserverScenePosition } from '../../../orbital/coordinates';
 import { simClock } from '../../SimClock';
-import { useStore } from '../../../store/useStore';
+import { useStore, isObserverMode, type VisibilityMode } from '../../../store/useStore';
 import type { EnrichedTLEObject } from '../../../data/types';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
@@ -123,12 +123,14 @@ export class SatellitesLayer implements Layer {
         }
 
         if (
-          state.visibilityMode === 'visual' &&
+          isObserverMode(state.visibilityMode) &&
           state.observerLocation &&
           (modeChanged || obsLocChanged)
         ) {
-          callbacks.onEnterObserverSky(state.observerLocation);
-        } else if (modeChanged && fromMode === 'visual' && state.visibilityMode !== 'visual') {
+          // Covers entering visual/dome AND switching between them (re-enter
+          // re-seeds the rig + FOV for the new mode).
+          callbacks.onEnterObserverSky(state.observerLocation, state.visibilityMode);
+        } else if (modeChanged && isObserverMode(fromMode) && !isObserverMode(state.visibilityMode)) {
           callbacks.onExitObserverSky();
         }
 
@@ -366,8 +368,9 @@ export interface SatellitesLayerCallbacks {
   onTrailRefresh: () => void;
   /** Observer location changed → reposition the observer marker. */
   onObserverChange: (loc: ObserverLoc | null) => void;
-  /** Entered visual mode (or moved) with an observer set → snap the sky camera. */
-  onEnterObserverSky: (loc: ObserverLoc) => void;
-  /** Left visual mode → return the camera home. */
+  /** Entered visual/dome (or moved, or switched between them) with an observer set
+   *  → enter the observer-sky rig for that mode. */
+  onEnterObserverSky: (loc: ObserverLoc, mode: VisibilityMode) => void;
+  /** Left visual/dome for a non-observer mode → return the camera home. */
   onExitObserverSky: () => void;
 }

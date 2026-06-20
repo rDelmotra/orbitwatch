@@ -8,7 +8,7 @@ import {
   isObserverInDarkFromComponents,
 } from '../orbital/lighting';
 import {
-  evaluateVisualVisibility,
+  evaluateDomeBrightness,
   VISUAL_ELEVATION_THRESHOLD_SIN,
   VISUAL_FADING_START_SIN,
   VISUAL_RANGE_MAX_KM,
@@ -261,7 +261,6 @@ export class SatelliteRenderer {
     const obsInDark = observerAvailable && hasZenith
       ? isObserverInDarkFromComponents(obsX, obsY, obsZ, sunX, sunY, sunZ)
       : false;
-    const hasVisualList = visualNoradIds.size > 0;
 
     for (let i = 0; i < count; i++) {
       const obj = catalogData[i];
@@ -273,59 +272,7 @@ export class SatelliteRenderer {
       if (isVisibleBase) {
         finalMult = this.multipliers[i];
 
-        if (visibilityMode === 'visual') {
-          // Fail-closed: visual mode requires curated NORAD membership + observer location.
-          if (!hasVisualList || !observerAvailable || !hasZenith) {
-            finalMult = 0.0;
-          } else {
-            const i3 = i * 3;
-            const satX = currArr[i3];
-            const satY = currArr[i3 + 1];
-            const satZ = currArr[i3 + 2];
-            const vx = satX - obsX;
-            const vy = satY - obsY;
-            const vz = satZ - obsZ;
-            const vDist = Math.sqrt((vx * vx) + (vy * vy) + (vz * vz));
-            if (vDist === 0) {
-              finalMult = 0.0;
-            } else {
-              const elevationSin = ((vx * zenithX) + (vy * zenithY) + (vz * zenithZ)) / vDist;
-              const distKm = vDist * 6371;
-              const visibility = evaluateVisualVisibility({
-                isCurated: visualNoradIds.has(obj.noradId),
-                elevationSin,
-                rangeKm: distKm,
-                observerDark: obsInDark,
-                satelliteEclipsed: isEclipsedFromComponents(satX, satY, satZ, sunX, sunY, sunZ),
-              });
-
-              if (!visibility.visible) {
-                finalMult = 0.0;
-              } else {
-                finalMult *= getPhaseMultiplierFromComponents(
-                  satX,
-                  satY,
-                  satZ,
-                  obsX,
-                  obsY,
-                  obsZ,
-                  sunX,
-                  sunY,
-                  sunZ,
-                ) * 1.5;
-              }
-
-              // Fading cone: gradual falloff from 45° to 10° elevation
-              if (finalMult > 0.0 && elevationSin < VISUAL_FADING_START_SIN) {
-                finalMult *= Math.max(
-                  0.4,
-                  (elevationSin - VISUAL_ELEVATION_THRESHOLD_SIN)
-                  / (VISUAL_FADING_START_SIN - VISUAL_ELEVATION_THRESHOLD_SIN),
-                );
-              }
-            }
-          }
-        } else if (visibilityMode === 'radio' && observerAvailable && hasZenith) {
+        if (visibilityMode === 'radio' && observerAvailable && hasZenith) {
           const i3 = i * 3;
           const satX = currArr[i3];
           const satY = currArr[i3 + 1];
@@ -355,6 +302,33 @@ export class SatelliteRenderer {
                 );
               }
             }
+          }
+        } else if (visibilityMode === 'dome' && observerAvailable && hasZenith) {
+          // Sky-dome: everything above the horizon, naked-eye ones highlighted. The
+          // per-object policy (horizon gate + highlight + fade) lives in the pure
+          // evaluateDomeBrightness(); the renderer just supplies geometry + lighting.
+          const i3 = i * 3;
+          const satX = currArr[i3];
+          const satY = currArr[i3 + 1];
+          const satZ = currArr[i3 + 2];
+          const vx = satX - obsX;
+          const vy = satY - obsY;
+          const vz = satZ - obsZ;
+          const vDist = Math.sqrt((vx * vx) + (vy * vy) + (vz * vz));
+          if (vDist === 0) {
+            finalMult = 0.0;
+          } else {
+            const elevationSin = ((vx * zenithX) + (vy * zenithY) + (vz * zenithZ)) / vDist;
+            finalMult *= evaluateDomeBrightness({
+              elevationSin,
+              rangeKm: vDist * 6371,
+              isCurated: visualNoradIds.has(obj.noradId),
+              observerDark: obsInDark,
+              satelliteEclipsed: isEclipsedFromComponents(satX, satY, satZ, sunX, sunY, sunZ),
+              illuminatedPhase: getPhaseMultiplierFromComponents(
+                satX, satY, satZ, obsX, obsY, obsZ, sunX, sunY, sunZ,
+              ),
+            });
           }
         }
 

@@ -26,6 +26,7 @@ export class InputManager {
   private readonly onDeselect: () => void;
   private readonly onDragExitFollow: () => void;
   private readonly onJoyrideLookInput: (dx: number, dy: number) => void;
+  private readonly onDomeLookInput: (dAz: number, dEl: number) => void;
 
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -33,6 +34,7 @@ export class InputManager {
 
   private pointerDownPos: { x: number; y: number } | null = null;
   private joyrideLookPointerPos: { x: number; y: number } | null = null;
+  private domeLookPointerPos: { x: number; y: number } | null = null;
   private lastHoverTime = 0;
 
   constructor(
@@ -48,6 +50,7 @@ export class InputManager {
       onDeselect: () => void;
       onDragExitFollow: () => void;
       onJoyrideLookInput: (dx: number, dy: number) => void;
+      onDomeLookInput: (dAz: number, dEl: number) => void;
     },
   ) {
     this.canvas = deps.canvas;
@@ -60,6 +63,7 @@ export class InputManager {
     this.onDeselect = callbacks.onDeselect;
     this.onDragExitFollow = callbacks.onDragExitFollow;
     this.onJoyrideLookInput = callbacks.onJoyrideLookInput;
+    this.onDomeLookInput = callbacks.onDomeLookInput;
 
     this.canvas.addEventListener('pointerdown', this.handlePointerDown);
     this.canvas.addEventListener('pointerup', this.handlePointerUp);
@@ -109,6 +113,11 @@ export class InputManager {
       this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
       return;
     }
+    // Sky-dome look: drag rotates the gaze (OrbitControls are disabled here). Also
+    // record pointerDownPos so a tap still falls through to GPU pick/select below.
+    if (state.cameraMode === 'free' && state.visibilityMode === 'dome' && state.observerLocation) {
+      this.domeLookPointerPos = { x: e.clientX, y: e.clientY };
+    }
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
   };
 
@@ -126,6 +135,23 @@ export class InputManager {
         this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
         if (dx !== 0 || dy !== 0) {
           this.onJoyrideLookInput(dx * 0.003, dy * 0.0025);
+        }
+        return;
+      }
+    }
+
+    if (this.domeLookPointerPos) {
+      const domeActive =
+        mode === 'free' && state.visibilityMode === 'dome' && state.observerLocation !== null;
+      if (!domeActive) {
+        this.domeLookPointerPos = null;
+      } else {
+        const dx = e.clientX - this.domeLookPointerPos.x;
+        const dy = e.clientY - this.domeLookPointerPos.y;
+        this.domeLookPointerPos = { x: e.clientX, y: e.clientY };
+        if (dx !== 0 || dy !== 0) {
+          // Grab-the-sky: the sky follows the drag (content tracks the finger).
+          this.onDomeLookInput(-dx * 0.0025, dy * 0.0025);
         }
         return;
       }
@@ -197,6 +223,7 @@ export class InputManager {
       return;
     }
 
+    this.domeLookPointerPos = null;
     if (!this.pointerDownPos || !this.gpuPicker) return;
 
     const dx = e.clientX - this.pointerDownPos.x;

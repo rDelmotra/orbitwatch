@@ -239,7 +239,6 @@ export function FilterPanel() {
   if (loadingPhase !== 'ready') return null;
 
   const totalVisible = Object.values(visibleCatCounts).reduce((a, b) => a + b, 0);
-  const visualModeAvailable = visualList.status === 'fresh' || visualList.status === 'stale';
 
   const visualStatusColor = visualList.status === 'fresh'
     ? 'rgba(76, 175, 80, 0.9)'
@@ -257,7 +256,7 @@ export function FilterPanel() {
         ? 'VISUAL list: Loading'
         : 'VISUAL list: Unavailable';
 
-  const handleRequestLocation = async (autoSwitchToLocalMode: boolean) => {
+  const handleRequestLocation = async () => {
     if (isLocating) {
       return;
     }
@@ -293,9 +292,6 @@ export function FilterPanel() {
       const location = toObserverLocation(position);
       cacheObserverLocation(location);
       setObserverLocation(location);
-      if (autoSwitchToLocalMode) {
-        setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
-      }
       setLocationStatusMessage(null);
     } catch (err) {
       const cached = readCachedObserverLocation();
@@ -303,9 +299,6 @@ export function FilterPanel() {
         const cacheAgeMs = Date.now() - cached.savedAt;
         if (cacheAgeMs <= OBSERVER_LOCATION_CACHE_MAX_AGE_MS) {
           setObserverLocation({ lat: cached.lat, lon: cached.lon, alt: cached.alt });
-          if (autoSwitchToLocalMode) {
-            setVisibilityMode(visualModeAvailable ? 'visual' : 'radio');
-          }
           setLocationStatusMessage(
             `Live location unavailable; using saved location (${new Date(cached.savedAt).toISOString().slice(11, 19)} UTC).`,
           );
@@ -392,7 +385,7 @@ export function FilterPanel() {
            {observerLocation === null ? (
                <>
                  <button
-                    onClick={() => void handleRequestLocation(true)}
+                    onClick={() => void handleRequestLocation()}
                     disabled={isLocating}
                     style={{
                      background: 'rgba(255, 255, 255, 0.1)',
@@ -420,7 +413,7 @@ export function FilterPanel() {
                      Lat: {observerLocation.lat.toFixed(2)}°, Lon: {observerLocation.lon.toFixed(2)}°
                    </div>
                     <button
-                      onClick={() => void handleRequestLocation(false)}
+                      onClick={() => void handleRequestLocation()}
                       disabled={isLocating}
                       style={{
                        alignSelf: 'flex-start',
@@ -457,14 +450,10 @@ export function FilterPanel() {
                     <span>Radio Pass (&gt;10° Elev)</span>
                     {visibilityMode === 'radio' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'visual' ? 1 : (visualModeAvailable ? 0.4 : 0.25), transition: 'opacity 0.15s' }}>
-                     <Toggle
-                      on={visibilityMode === 'visual'}
-                      onToggle={() => setVisibilityMode('visual')}
-                      disabled={!visualModeAvailable}
-                     />
-                     <span title="Curated CelesTrak VISUAL list + local range/elevation/sunlight constraints">Naked-Eye Candidates</span>
-                     {visibilityMode === 'visual' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: visibilityMode === 'dome' ? 1 : 0.4, transition: 'opacity 0.15s' }}>
+                     <Toggle on={visibilityMode === 'dome'} onToggle={() => setVisibilityMode('dome')} />
+                     <span title="Stand at your location and look up — every object above your horizon, in true alt/azimuth. Naked-eye-visible ones glow brighter.">Sky Dome (Planetarium)</span>
+                     {visibilityMode === 'dome' && <span style={countStyle}>{totalVisible.toLocaleString()}</span>}
                   </div>
                   {visualList.status === 'stale' && (
                     <div style={{ fontSize: 10, color: 'rgba(255, 193, 7, 0.95)', lineHeight: 1.3, marginTop: 2 }}>
@@ -473,7 +462,7 @@ export function FilterPanel() {
                   )}
                   {visualList.status === 'unavailable' && (
                     <div style={{ fontSize: 10, color: 'rgba(244, 67, 54, 0.95)', lineHeight: 1.3, marginTop: 2 }}>
-                      Curated visual list unavailable; switched to Radio Pass mode.
+                      Curated visual list unavailable; Sky Dome highlights are off.
                     </div>
                   )}
                 </>

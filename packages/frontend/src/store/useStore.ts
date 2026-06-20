@@ -8,7 +8,12 @@ import { simClock } from '../engine/SimClock';
 export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready';
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
 export type TrackingStyle = 'follow' | 'joyride';
-export type VisibilityMode = 'all' | 'radio' | 'visual';
+export type VisibilityMode = 'all' | 'radio' | 'dome';
+
+/** Visibility modes that drive the observer-anchored sky camera (vs the globe view). */
+export function isObserverMode(mode: VisibilityMode): boolean {
+  return mode === 'dome';
+}
 
 export interface VisualListState {
   status: VisualListStatus;
@@ -255,13 +260,7 @@ export const useStore = create<AppState>((set) => ({
     }),
   clearCluster: () => set({ clusterItems: [] }),
   setObserverLocation: (loc) => set({ observerLocation: loc }),
-  setVisibilityMode: (mode) =>
-    set((state) => {
-      if (mode === 'visual' && state.visualList.status === 'unavailable') {
-        return { visibilityMode: 'radio' as VisibilityMode };
-      }
-      return { visibilityMode: mode };
-    }),
+  setVisibilityMode: (mode) => set({ visibilityMode: mode }),
   setVisualListState: (visualList) => set({ visualList }),
 
   simRate: 1,

@@ -1,10 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getSunDirection, getGAST } from '../orbital/time';
-import {
-  reconcileVisibilityModeForVisualStatus,
-  type VisualListResolvedResult,
-} from '../data/visualList';
+import type { VisualListResolvedResult } from '../data/visualList';
 import { VisualListPoller } from '../data/tle-client';
 import { bootstrapCatalog } from '../data/bootstrapCatalog';
 import type { EnrichedTLEObject } from '../data/types';
@@ -24,6 +21,7 @@ import { TrailsLayer } from './world/layers/TrailsLayer';
 import { DsoLayer } from './world/layers/DsoLayer';
 import { SatellitesLayer } from './world/layers/SatellitesLayer';
 import { ObserverMarkerLayer } from './world/layers/ObserverMarkerLayer';
+import { HorizonLayer } from './world/layers/HorizonLayer';
 import { registerEngineCommands, type EngineCommands } from './command/EngineCommands';
 import type { FrameContext } from './render/Layer';
 
@@ -41,6 +39,7 @@ export class Engine {
   private animationId: number | null = null;
   private satellitesLayer: SatellitesLayer;
   private observerMarkerLayer: ObserverMarkerLayer;
+  private horizonLayer: HorizonLayer;
   private dsoLayer: DsoLayer;
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -74,6 +73,7 @@ export class Engine {
     const maxAnisotropy = this.renderer.getMaxAnisotropy();
     this.earthLayer = new EarthLayer();
     this.observerMarkerLayer = new ObserverMarkerLayer();
+    this.horizonLayer = new HorizonLayer();
     this.trailsLayer = new TrailsLayer();
     this.dsoLayer = new DsoLayer();
     this.satellitesLayer = new SatellitesLayer();
@@ -82,6 +82,9 @@ export class Engine {
     });
     this.world.register(this.earthLayer);
     this.world.register(this.observerMarkerLayer);
+    // Parents to the Earth group (like the observer marker), so its scene-root
+    // registration order is irrelevant; dome-only visibility toggled in update().
+    this.world.register(this.horizonLayer);
     this.world.register(new StarfieldLayer());
     this.world.register(this.trailsLayer);
     this.world.register(this.dsoLayer);
@@ -100,6 +103,7 @@ export class Engine {
     // The observer marker rotates with the Earth — parent it to the (now-built)
     // Earth group. Cross-layer wiring done by the Engine (layers never import layers).
     this.observerMarkerLayer.setParent(this.earthLayer.group);
+    this.horizonLayer.setParent(this.earthLayer.group);
 
     // ── Navigation (camera state machine) ──────────────────────────────────────
     this.nav = new NavigationController(
@@ -136,6 +140,7 @@ export class Engine {
           },
           onDragExitFollow: () => this.nav.notifyDragExitedFollowing(),
           onJoyrideLookInput: (dx, dy) => this.nav.addJoyrideLookInput(dx, dy),
+          onDomeLookInput: (dAz, dEl) => this.nav.addDomeLookInput(dAz, dEl),
         },
       );
     }
@@ -200,12 +205,16 @@ export class Engine {
             onSelectionInvalidated: () =>
               useStore.getState().setSelectedSatellite(null, null),
             onTrailRefresh: () => this.refreshOrbitTrail(),
-            onObserverChange: (loc) =>
+            onObserverChange: (loc) => {
               this.world.runLayerCommand(this.observerMarkerLayer, 'setLocation', () =>
                 this.observerMarkerLayer.setLocation(loc),
-              ),
-            onEnterObserverSky: (loc) => this.nav.focusCameraOnObserverSky(loc),
-            onExitObserverSky: () => this.nav.resetCamera(),
+              );
+              this.world.runLayerCommand(this.horizonLayer, 'setLocation', () =>
+                this.horizonLayer.setLocation(loc),
+              );
+            },
+            onEnterObserverSky: (loc, mode) => this.nav.enterObserverSky(loc, mode),
+            onExitObserverSky: () => this.nav.exitObserverSky(),
           }),
       );
 
@@ -340,14 +349,7 @@ export class Engine {
       message: result.message,
     });
 
-    const nextMode = reconcileVisibilityModeForVisualStatus(
-      store.visibilityMode,
-      result.status,
-    );
-    if (nextMode !== store.visibilityMode) {
-      store.setVisibilityMode(nextMode);
-    }
-
+    // Dome highlights react to the curated list updating → recompute counts.
     this.world.runLayerCommand(this.satellitesLayer, 'recompute', () =>
       this.satellitesLayer.recomputeVisibleCounts(useStore.getState()),
     );

@@ -5,7 +5,6 @@ const CACHE_MAX_AGE_MS = 8 * 60 * 60 * 1000;
 
 export type VisualListStatus = 'loading' | 'fresh' | 'stale' | 'unavailable';
 export type VisualListSource = 'celestrak' | 'cache' | 'local_storage' | null;
-export type VisibilityModeLike = 'all' | 'radio' | 'visual';
 
 export interface VisualListResolvedResult {
   kind: 'resolved';
@@ -178,16 +177,6 @@ export function parseVisualListResponse(
     etag: etag ?? (version ? `"${version}"` : null),
     message: stale ? 'Using stale backend visual cache.' : null,
   };
-}
-
-export function reconcileVisibilityModeForVisualStatus(
-  currentMode: VisibilityModeLike,
-  visualStatus: VisualListStatus,
-): VisibilityModeLike {
-  if (currentMode === 'visual' && visualStatus === 'unavailable') {
-    return 'radio';
-  }
-  return currentMode;
 }
 
 export async function fetchVisualList(

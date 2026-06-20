@@ -1,13 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CameraController, HOME_POSITION, HOME_TARGET } from '../CameraController';
-import { getObserverScenePosition } from '../../orbital/coordinates';
-import { simClock } from '../SimClock';
-import { useStore, type TrackingStyle } from '../../store/useStore';
+import { ObserverSkyController } from './ObserverSkyController';
+import { useStore, isObserverMode, type TrackingStyle, type VisibilityMode } from '../../store/useStore';
 import type { TrackingSource } from './TrackingSource';
-
-const VISUAL_CAMERA_EYE_HEIGHT_ER = 0.0000025;
-const VISUAL_CAMERA_LOOK_AHEAD_ER = 1.6;
 
 interface NavigationCallbacks {
   /** Tell the input layer to drop any in-progress joyride free-look state. */
@@ -29,6 +25,7 @@ export class NavigationController {
   private readonly source: TrackingSource;
   private readonly callbacks: NavigationCallbacks;
   private readonly cameraController: CameraController;
+  private readonly observerSky: ObserverSkyController;
 
   private arrivalTime = -1; // performance.now() when camera arrived; -1 = none
   private returnEndPos: THREE.Vector3 | null = null;
@@ -54,12 +51,22 @@ export class NavigationController {
     this.source = source;
     this.callbacks = callbacks;
     this.cameraController = new CameraController(camera);
+    this.observerSky = new ObserverSkyController(camera, controls);
 
     // Centralized camera mode transitions
     let prevCameraMode = useStore.getState().cameraMode;
     this.cameraModeUnsub = useStore.subscribe((state) => {
       if (state.cameraMode === prevCameraMode) return;
       prevCameraMode = state.cameraMode;
+
+      // The observer-sky rig only drives the camera in 'free'. Leaving it (fly-to /
+      // follow / joyride / return) hands the camera off, so release the rig's lens +
+      // world-up here — otherwise e.g. joyride inherits the dome's wide FOV. The rig
+      // is re-established below when the camera returns to 'free' (if still in an
+      // observer mode), so a dome → joyride → reset round-trip restores the dome.
+      if (state.cameraMode !== 'free' && this.observerSky.isActive()) {
+        this.observerSky.exit();
+      }
 
       // Any transition to 'free': cancel animation, re-enable controls
       if (state.cameraMode === 'free') {
@@ -74,6 +81,12 @@ export class NavigationController {
         } else if (this.returnEndPos) {
           this.controls.target.set(0, 0, 0);
           this.returnEndPos = null;
+        }
+
+        // Still in dome/visual? Re-establish the observer-sky rig (re-pins the eye +
+        // its FOV) so it survives a joyride/fly-to round-trip.
+        if (isObserverMode(state.visibilityMode) && state.observerLocation) {
+          this.observerSky.enter(state.observerLocation, state.visibilityMode);
         }
       }
 
@@ -134,15 +147,11 @@ export class NavigationController {
     const selectedDso = store.selectedDso;
 
     if (cameraMode === 'free') {
-      // Observer sky camera (visual mode): keep camera pinned to geolocation
-      // and facing up, so the view remains correct as Earth rotates.
-      if (store.visibilityMode === 'visual' && store.observerLocation) {
-        const { observerWorldPos, upDir } = this.getObserverSkyAnchor(store.observerLocation);
-        const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
-        const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
-        this.camera.position.copy(camPos);
-        this.controls.target.copy(lookTarget);
-        this.camera.lookAt(lookTarget);
+      // Observer-sky rig (visual / dome modes): eye pinned to the observer, gaze
+      // driven by drag. Delegated to ObserverSkyController, which re-anchors the
+      // eye each frame as the Earth rotates underneath.
+      if (this.observerSky.isActive() && store.observerLocation) {
+        this.observerSky.update(store.observerLocation);
       } else {
         this.controls.update();
       }
@@ -351,37 +360,31 @@ export class NavigationController {
     }
   }
 
-  focusCameraOnObserverSky(loc: { lat: number; lon: number; alt: number }): void {
-    const { observerWorldPos, upDir } = this.getObserverSkyAnchor(loc);
-    const camPos = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_EYE_HEIGHT_ER);
-    const lookTarget = observerWorldPos.clone().addScaledVector(upDir, VISUAL_CAMERA_LOOK_AHEAD_ER);
-
+  /** Enter the observer-sky rig for visual/dome mode (eye pinned + alt-az look). */
+  enterObserverSky(loc: { lat: number; lon: number; alt: number }, mode: VisibilityMode): void {
     const store = useStore.getState();
     if (store.cameraMode !== 'free') {
+      // The cameraMode → 'free' transition re-establishes the rig (see the sub
+      // above), reading the now-current observer mode + location — so don't also
+      // enter here, or it would double-fire.
       store.setCameraMode('free');
+      return;
     }
-
     this.cameraController.cancel();
     this.arrivalTime = -1;
     this.returnEndPos = null;
-    this.controls.enabled = true;
-    this.camera.position.copy(camPos);
-    this.controls.target.copy(lookTarget);
-    this.camera.lookAt(lookTarget);
-    this.controls.update();
+    this.observerSky.enter(loc, mode);
   }
 
-  private getObserverSkyAnchor(
-    loc: { lat: number; lon: number; alt: number },
-  ): { observerWorldPos: THREE.Vector3; upDir: THREE.Vector3 } {
-    const observerWorldPos = getObserverScenePosition(
-      loc.lat,
-      loc.lon,
-      loc.alt,
-      simClock.date(),
-    );
-    const upDir = observerWorldPos.clone().normalize();
-    return { observerWorldPos, upDir };
+  /** Leave the observer-sky rig (mode → non-observer) and return the camera home. */
+  exitObserverSky(): void {
+    this.observerSky.exit();
+    this.resetCamera();
+  }
+
+  /** Forward a dome alt-az look delta (radians) from the input layer into the rig. */
+  addDomeLookInput(deltaAzRad: number, deltaElRad: number): void {
+    this.observerSky.addLookInput(deltaAzRad, deltaElRad);
   }
 
   dispose(): void {
