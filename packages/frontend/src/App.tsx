@@ -1,15 +1,21 @@
-import { useEffect, useRef } from 'react';
-import { Engine } from './engine/Engine';
+import { Suspense, lazy, useEffect, useRef } from 'react';
+import type { Engine } from './engine/Engine';
 import { LoadingScreen } from './ui/LoadingScreen';
-import { HUD } from './ui/HUD';
-import { FilterPanel } from './ui/FilterPanel';
-import { SearchBar } from './ui/SearchBar';
-import { InfoCard } from './ui/InfoCard';
-import { Tooltip } from './ui/Tooltip';
-import { ClusterPopup } from './ui/ClusterPopup';
-import { DevOverlay } from './ui/DevOverlay';
-import { TimeController } from './ui/TimeController';
 import { useStore } from './store/useStore';
+
+// Post-`ready` overlay UI — none of it renders until loadingPhase === 'ready',
+// so it's split out of the first-paint chunk and streamed in at mount. Named
+// exports are mapped to default for React.lazy.
+const HUD = lazy(() => import('./ui/HUD').then((m) => ({ default: m.HUD })));
+const FilterPanel = lazy(() => import('./ui/FilterPanel').then((m) => ({ default: m.FilterPanel })));
+const SearchBar = lazy(() => import('./ui/SearchBar').then((m) => ({ default: m.SearchBar })));
+const InfoCard = lazy(() => import('./ui/InfoCard').then((m) => ({ default: m.InfoCard })));
+const Tooltip = lazy(() => import('./ui/Tooltip').then((m) => ({ default: m.Tooltip })));
+const ClusterPopup = lazy(() => import('./ui/ClusterPopup').then((m) => ({ default: m.ClusterPopup })));
+const TimeController = lazy(() =>
+  import('./ui/TimeController').then((m) => ({ default: m.TimeController })),
+);
+const DevOverlay = lazy(() => import('./ui/DevOverlay').then((m) => ({ default: m.DevOverlay })));
 
 function DsoLabels() {
   const labelPositions = useStore((s) => s.dsoLabelPositions);
@@ -85,12 +91,22 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const engine = new Engine(canvas);
-    engineRef.current = engine;
-    engine.start();
+    // Lazy-load the Engine (and three.js) so it's out of the first-paint chunk.
+    let engine: Engine | null = null;
+    let cancelled = false;
+
+    import('./engine/Engine').then(({ Engine }) => {
+      // Guard the StrictMode double-mount: if the effect was torn down before
+      // the import resolved, don't construct an orphaned (leaking) Engine.
+      if (cancelled || !canvasRef.current) return;
+      engine = new Engine(canvasRef.current);
+      engineRef.current = engine;
+      engine.start();
+    });
 
     return () => {
-      engine.dispose();
+      cancelled = true;
+      engine?.dispose();
       engineRef.current = null;
     };
   }, []);
@@ -101,27 +117,29 @@ export default function App() {
         ref={canvasRef}
         style={{ display: 'block', width: '100%', height: '100%' }}
       />
-      <div
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          pointerEvents: 'none',
-        }}
-      >
-        <HUD />
-        <SearchBar />
-        <FilterPanel />
-        <InfoCard />
-        <DsoLabels />
-        <TimeController />
-        <ResetViewButton />
-      </div>
-      <Tooltip />
-      <ClusterPopup />
-      {import.meta.env.DEV && <DevOverlay />}
+      <Suspense fallback={null}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+          }}
+        >
+          <HUD />
+          <SearchBar />
+          <FilterPanel />
+          <InfoCard />
+          <DsoLabels />
+          <TimeController />
+          <ResetViewButton />
+        </div>
+        <Tooltip />
+        <ClusterPopup />
+        {import.meta.env.DEV && <DevOverlay />}
+      </Suspense>
       <LoadingScreen />
     </div>
   );
