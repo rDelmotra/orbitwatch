@@ -21,6 +21,9 @@ const EYE_HEIGHT_ER = 0.0000025;
 const DOME_HFOV_DEG = 65;
 /** Cap on the derived vertical FOV so very tall/portrait screens don't go fisheye. */
 const DOME_VFOV_MAX_DEG = 100;
+/** Scroll/pinch zoom range for the dome lens (horizontal FOV degrees). */
+const DOME_HFOV_MIN_DEG = 18; // fully zoomed in (telescope-ish)
+const DOME_HFOV_MAX_DEG = 90; // fully zoomed out (wide field)
 const MIN_ELEVATION_RAD = THREE.MathUtils.degToRad(-5);
 const MAX_ELEVATION_RAD = THREE.MathUtils.degToRad(89);
 /** Initial gaze: facing north (az 0), tilted ~45° up the dome. */
@@ -53,6 +56,8 @@ export class ObserverSkyController {
   private active = false;
   /** True while the wide dome lens is applied (mode === 'dome'); 'visual' keeps default. */
   private domeLens = false;
+  /** Current dome **horizontal** FOV (degrees); driven by scroll/pinch zoom. */
+  private domeHFovDeg = DOME_HFOV_DEG;
   /** Aspect the dome vertical FOV was last derived from; re-derived on change (resize/rotate). */
   private lastAspect = 0;
   private azimuth = 0; // radians, measured from North toward East
@@ -86,6 +91,7 @@ export class ObserverSkyController {
     this.active = true;
     this.azimuth = 0;
     this.elevation = INITIAL_ELEVATION_RAD;
+    this.domeHFovDeg = DOME_HFOV_DEG; // fresh entry starts at the default lens
     this.onHeadingChange?.(this.azimuth);
     this.controls.enabled = false;
     this.domeLens = mode === 'dome';
@@ -175,7 +181,22 @@ export class ObserverSkyController {
   private applyDomeFov(): void {
     const aspect = this.camera.aspect;
     this.lastAspect = aspect;
-    this.setFov(verticalFovForHorizontal(DOME_HFOV_DEG, aspect, DOME_VFOV_MAX_DEG));
+    this.setFov(verticalFovForHorizontal(this.domeHFovDeg, aspect, DOME_VFOV_MAX_DEG));
+  }
+
+  /**
+   * Scroll/pinch zoom — the Star Walk lens. `factor < 1` narrows the FOV (zoom in),
+   * `factor > 1` widens it (zoom out); the horizontal FOV is clamped to
+   * [{@link DOME_HFOV_MIN_DEG}, {@link DOME_HFOV_MAX_DEG}]. No-op outside dome mode.
+   */
+  zoom(factor: number): void {
+    if (!this.active || !this.domeLens) return;
+    this.domeHFovDeg = THREE.MathUtils.clamp(
+      this.domeHFovDeg * factor,
+      DOME_HFOV_MIN_DEG,
+      DOME_HFOV_MAX_DEG,
+    );
+    this.applyDomeFov();
   }
 
   private setFov(fov: number): void {
