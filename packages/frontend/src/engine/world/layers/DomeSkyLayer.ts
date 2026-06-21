@@ -50,12 +50,15 @@ void main() {
   vec3 color = mix(horizonColor, zenithColor, g);
 
   // Warm twilight glow toward the sun, strongest near the horizon while the sun
-  // sits just below/above it.
+  // sits just below/above it. Gated to CIVIL twilight + golden hour: sunElev is
+  // sin(sun altitude), so the band rides ~ -7° (sin -0.12) up through the horizon
+  // and fades out by ~ +7° (sin +0.12). Past civil twilight the night sky is dim
+  // blue, not orange — this is what keeps the glow honest after the sun has set.
   float towardSun        = max(dot(viewDir, sunDir), 0.0);
-  float twilightWindow   = smoothstep(-0.32, 0.06, sunElev) * (1.0 - smoothstep(0.06, 0.32, sunElev));
+  float twilightWindow   = smoothstep(-0.12, -0.02, sunElev) * (1.0 - smoothstep(0.02, 0.12, sunElev));
   float horizonProximity = 1.0 - smoothstep(0.0, 0.32, abs(elev));
   float glow = pow(towardSun, 3.0) * twilightWindow * horizonProximity;
-  color += vec3(1.0, 0.46, 0.20) * glow * 0.7;
+  color += vec3(1.0, 0.46, 0.20) * glow * 0.6;
 
   // Below the horizon: fade to near‑black (implied ground; there is no floor object).
   float belowFade = smoothstep(0.0, -0.25, elev);
