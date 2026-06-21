@@ -15,6 +15,21 @@ export function isObserverMode(mode: VisibilityMode): boolean {
   return mode === 'dome';
 }
 
+/**
+ * True only while the camera is actually in the dome observer view — standing on the
+ * ground looking up: `free` camera + `dome` mode + a known observer location. Joyride
+ * and fly-to flip `cameraMode` away from `free` (the observer rig exits), so this gates
+ * the dome **visuals** (gradient sky, hidden Earth surface, compass) off and restores
+ * the normal space view — keeping visuals in lockstep with the camera, no race.
+ */
+export function isDomeView(s: {
+  cameraMode: CameraMode;
+  visibilityMode: VisibilityMode;
+  observerLocation: { lat: number; lon: number; alt: number } | null;
+}): boolean {
+  return s.cameraMode === 'free' && s.visibilityMode === 'dome' && s.observerLocation !== null;
+}
+
 export interface VisualListState {
   status: VisualListStatus;
   version: string | null;

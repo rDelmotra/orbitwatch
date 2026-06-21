@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getObserverECEFPosition } from '../../../orbital/coordinates';
-import { useStore } from '../../../store/useStore';
+import { useStore, isDomeView } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 type ObserverLoc = { lat: number; lon: number; alt: number };
@@ -52,11 +52,12 @@ export class ObserverMarkerLayer implements Layer {
   }
 
   update(_frame: FrameContext): void {
-    // Hide the marker in dome mode: the camera sits AT the observer, so the cone
-    // would just clutter the view from the inside (the HorizonLayer is the dome's
-    // ground reference instead).
+    // Hide the marker only while actually in the dome view: the camera sits AT the
+    // observer, so the cone would clutter the inside. During joyride/fly-to out of
+    // dome the camera is in space, so the marker should show again (like any space
+    // view with an observer set) — gate on isDomeView, not visibilityMode alone.
     if (this.marker) {
-      this.marker.visible = useStore.getState().visibilityMode !== 'dome';
+      this.marker.visible = !isDomeView(useStore.getState());
     }
   }
 

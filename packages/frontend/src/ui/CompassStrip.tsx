@@ -1,4 +1,4 @@
-import { useStore } from '../store/useStore';
+import { useStore, isDomeView } from '../store/useStore';
 
 /**
  * Flat HUD compass strip for dome mode — a distortion-free heading readout that
@@ -37,11 +37,12 @@ function wrapDelta(deg: number): number {
 }
 
 export function CompassStrip() {
-  const visibilityMode = useStore((s) => s.visibilityMode);
+  const domeView = useStore((s) => isDomeView(s));
   const loadingPhase = useStore((s) => s.loadingPhase);
   const headingRad = useStore((s) => s.observerHeadingRad);
 
-  if (loadingPhase !== 'ready' || visibilityMode !== 'dome') return null;
+  // Hidden outside the dome observer view (incl. joyride/fly-to out of dome).
+  if (loadingPhase !== 'ready' || !domeView) return null;
 
   const headingDeg = (headingRad * 180) / Math.PI;
   const half = VISIBLE_SPAN_DEG / 2;

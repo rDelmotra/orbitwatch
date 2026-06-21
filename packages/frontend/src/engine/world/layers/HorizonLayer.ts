@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getObserverECEFPosition } from '../../../orbital/coordinates';
-import { useStore } from '../../../store/useStore';
+import { useStore, isDomeView } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 type ObserverLoc = { lat: number; lon: number; alt: number };
@@ -80,7 +80,7 @@ export class HorizonLayer implements Layer {
 
     if (!this.group) {
       this.build();
-      this.group!.visible = useStore.getState().visibilityMode === 'dome';
+      this.group!.visible = isDomeView(useStore.getState());
       this.parent.add(this.group!);
     }
 
@@ -106,9 +106,10 @@ export class HorizonLayer implements Layer {
   }
 
   update(_frame: FrameContext): void {
-    // Static under the rotating Earth group; only its visibility tracks the mode.
+    // Static under the rotating Earth group; visibility tracks the dome view (off in
+    // joyride/fly-to out of dome, so the compass doesn't float in the space view).
     if (this.group) {
-      this.group.visible = useStore.getState().visibilityMode === 'dome';
+      this.group.visible = isDomeView(useStore.getState());
     }
   }
 
