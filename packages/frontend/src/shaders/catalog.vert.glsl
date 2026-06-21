@@ -4,6 +4,7 @@ attribute vec3 color;
 attribute float previousSize;
 attribute float currentSize;
 attribute vec3 pickId;
+attribute float highlight; // 1.0 = naked-eye-visible in Sky Dome → gold tint
 
 uniform float uPixelRatio;
 uniform float uCameraDistance;
@@ -54,7 +55,9 @@ void main() {
     pointSize *= max(sizeBoost, 1.0);
     vColor = vec3(0.0, 0.898, 1.0); // cyan override for selected object
   } else {
-    vColor = color * uBaseColor;
+    // Sky-dome naked-eye highlight: tint toward bright gold so the visible passes
+    // pop out of the faint background traffic regardless of category colour.
+    vColor = mix(color * uBaseColor, vec3(1.0, 0.92, 0.55), highlight);
   }
 
   pointSize *= pow(max(sizeFade, 0.0), 0.82);

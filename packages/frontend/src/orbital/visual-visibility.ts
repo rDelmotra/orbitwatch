@@ -74,9 +74,16 @@ export interface DomeBrightnessInput {
   illuminatedPhase: number;
 }
 
+export interface DomeBrightnessResult {
+  /** Size/brightness multiplier for the object's base size (0 = hidden). */
+  factor: number;
+  /** True when genuinely naked-eye-visible — drives the colour highlight. */
+  highlighted: boolean;
+}
+
 /**
- * Sky-dome size/brightness FACTOR for one satellite — multiply the object's base
- * size by this. `0` = hidden (below the horizon).
+ * Sky-dome size/brightness for one satellite — multiply the object's base size by
+ * `factor` (`0` = hidden, below the horizon), and tint it when `highlighted`.
  *
  * Policy for the planetarium view: show everything above the horizon, but make the
  * genuinely naked-eye-visible objects (curated + dark + uneclipsed + in range, via
@@ -84,9 +91,9 @@ export interface DomeBrightnessInput {
  * pass never sinks into the faint background "traffic". Both fade gently across the
  * lowest 0–10° band so passes rise and set cleanly at the horizon.
  */
-export function evaluateDomeBrightness(input: DomeBrightnessInput): number {
+export function evaluateDomeBrightness(input: DomeBrightnessInput): DomeBrightnessResult {
   if (input.elevationSin < DOME_ELEVATION_THRESHOLD_SIN) {
-    return 0; // below the horizon — not in the observer's sky
+    return { factor: 0, highlighted: false }; // below the horizon — not in the sky
   }
 
   const nakedEyeVisible = input.isCurated && evaluateVisualVisibility({
@@ -109,5 +116,5 @@ export function evaluateDomeBrightness(input: DomeBrightnessInput): number {
     );
   }
 
-  return factor;
+  return { factor, highlighted: nakedEyeVisible };
 }

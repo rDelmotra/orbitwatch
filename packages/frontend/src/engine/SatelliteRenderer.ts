@@ -38,6 +38,7 @@ export class SatelliteRenderer {
   private readonly sizeAttr: THREE.BufferAttribute; // Alias for currSizeAttr for picking
   private readonly colorAttr: THREE.BufferAttribute;
   private readonly pickIdAttr: THREE.BufferAttribute;
+  private readonly highlightAttr: THREE.BufferAttribute;
   private readonly multipliers: Float32Array;
   private readonly filterMask: Uint8Array;
   private readonly validFlags: Uint8Array;
@@ -49,6 +50,7 @@ export class SatelliteRenderer {
     const currSizes = new Float32Array(MAX_OBJECTS);
     const colors = new Float32Array(MAX_OBJECTS * 3);
     const pickIds = new Float32Array(MAX_OBJECTS * 3); // 0,0,0 = background until initFromCatalog
+    const highlights = new Float32Array(MAX_OBJECTS); // 0 = normal, 1 = naked-eye highlight (dome)
     this.multipliers = new Float32Array(MAX_OBJECTS).fill(1.0);
     this.filterMask = new Uint8Array(MAX_OBJECTS).fill(1);
     this.validFlags = new Uint8Array(MAX_OBJECTS).fill(0);
@@ -61,6 +63,7 @@ export class SatelliteRenderer {
     this.sizeAttr = this.currSizeAttr;
     this.colorAttr = new THREE.BufferAttribute(colors, 3);
     this.pickIdAttr = new THREE.BufferAttribute(pickIds, 3);
+    this.highlightAttr = new THREE.BufferAttribute(highlights, 1);
 
     this.geometry.setAttribute('previousPosition', this.prevPosAttr);
     this.geometry.setAttribute('currentPosition', this.currPosAttr);
@@ -70,6 +73,7 @@ export class SatelliteRenderer {
     this.geometry.setAttribute('size', this.sizeAttr); // For CPU picking compatibility
     this.geometry.setAttribute('color', this.colorAttr);
     this.geometry.setAttribute('pickId', this.pickIdAttr);
+    this.geometry.setAttribute('highlight', this.highlightAttr);
 
     this.material = new THREE.ShaderMaterial({
       vertexShader,
@@ -233,6 +237,7 @@ export class SatelliteRenderer {
     const prevSizeArr = this.prevSizeAttr.array as Float32Array;
     const currSizeArr = this.currSizeAttr.array as Float32Array;
     const currArr = this.currPosAttr.array as Float32Array;
+    const highlightArr = this.highlightAttr.array as Float32Array;
 
     if (!snap) {
       prevSizeArr.set(currSizeArr);
@@ -266,6 +271,7 @@ export class SatelliteRenderer {
       const obj = catalogData[i];
       const isVisibleBase = this.validFlags[i] === 1 && categoryFilters[obj.category] && regimeFilters[obj.regime];
       this.filterMask[i] = isVisibleBase ? 1 : 0;
+      highlightArr[i] = 0; // default; only the dome's naked-eye-visible ones light up
 
       let finalMult = 0.0;
 
@@ -319,7 +325,7 @@ export class SatelliteRenderer {
             finalMult = 0.0;
           } else {
             const elevationSin = ((vx * zenithX) + (vy * zenithY) + (vz * zenithZ)) / vDist;
-            finalMult *= evaluateDomeBrightness({
+            const dome = evaluateDomeBrightness({
               elevationSin,
               rangeKm: vDist * 6371,
               isCurated: visualNoradIds.has(obj.noradId),
@@ -329,6 +335,8 @@ export class SatelliteRenderer {
                 satX, satY, satZ, obsX, obsY, obsZ, sunX, sunY, sunZ,
               ),
             });
+            finalMult *= dome.factor;
+            if (dome.highlighted) highlightArr[i] = 1;
           }
         }
 
@@ -347,6 +355,7 @@ export class SatelliteRenderer {
     }
     this.prevSizeAttr.needsUpdate = true;
     this.currSizeAttr.needsUpdate = true;
+    this.highlightAttr.needsUpdate = true;
     return { categoryCounts: catCounts, regimeCounts: regCounts };
   }
 
