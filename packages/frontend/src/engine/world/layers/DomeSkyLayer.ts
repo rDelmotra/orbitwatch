@@ -112,9 +112,12 @@ void main() {
 
   float sunElev = dot(uSunDir, uUp);
   float dayness = smoothstep(-0.18, 0.10, sunElev);
-  vec3  deep    = mix(vec3(0.010, 0.020, 0.035), vec3(0.05, 0.12, 0.16), dayness);
+  // Deeper, more saturated body so the sea reads as opaque water (not a dark void)
+  // even looking straight down where Fresnel reflection is weak.
+  vec3  deep    = mix(vec3(0.020, 0.050, 0.075), vec3(0.06, 0.16, 0.21), dayness);
 
-  vec3 color = mix(deep, refl, fresnel);
+  // Bias slightly toward the reflection floor so the surface always has some sheen.
+  vec3 color = mix(deep, refl, clamp(fresnel + 0.06, 0.0, 1.0));
 
   // Sun glitter on the wave facets — only while the sun is above the horizon.
   float glitter = pow(max(dot(reflDir, normalize(uSunDir)), 0.0), 120.0);
