@@ -16,6 +16,9 @@ const TimeController = lazy(() =>
   import('./ui/TimeController').then((m) => ({ default: m.TimeController })),
 );
 const DevOverlay = lazy(() => import('./ui/DevOverlay').then((m) => ({ default: m.DevOverlay })));
+const CompassStrip = lazy(() =>
+  import('./ui/CompassStrip').then((m) => ({ default: m.CompassStrip })),
+);
 
 function DsoLabels() {
   const labelPositions = useStore((s) => s.dsoLabelPositions);
@@ -134,6 +137,7 @@ export default function App() {
           <InfoCard />
           <DsoLabels />
           <TimeController />
+          <CompassStrip />
           <ResetViewButton />
         </div>
         <Tooltip />

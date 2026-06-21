@@ -51,7 +51,9 @@ export class NavigationController {
     this.source = source;
     this.callbacks = callbacks;
     this.cameraController = new CameraController(camera);
-    this.observerSky = new ObserverSkyController(camera, controls);
+    this.observerSky = new ObserverSkyController(camera, controls, (headingRad) => {
+      useStore.getState().setObserverHeadingRad(headingRad);
+    });
 
     // Centralized camera mode transitions
     let prevCameraMode = useStore.getState().cameraMode;

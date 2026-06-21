@@ -8,8 +8,19 @@ type ObserverLoc = { lat: number; lon: number; alt: number };
 
 /** Eye height above the observer's feet, in Earth radii (~16 m). */
 const EYE_HEIGHT_ER = 0.0000025;
-/** Wider FOV for the immersive dome (Star Walk-style); visual mode keeps default. */
-const DOME_FOV_DEG = 90;
+/**
+ * Target **horizontal** FOV for the immersive dome (Star Walk-style); visual mode
+ * keeps the default lens. Three.js `camera.fov` is vertical, so we derive the
+ * vertical FOV from this target + the live aspect ratio (see {@link verticalFovForHorizontal}).
+ * Kept moderate (not the full 90°): at 90° the cardinals 90° apart sit right at the
+ * screen edges — the most `tan`-distorted zone — which makes the horizon markers
+ * appear to taper/expand as you look around. A narrower span crops that periphery,
+ * which is exactly why phone planetarium apps feel clean (the HUD compass strip
+ * carries the wider directional context).
+ */
+const DOME_HFOV_DEG = 65;
+/** Cap on the derived vertical FOV so very tall/portrait screens don't go fisheye. */
+const DOME_VFOV_MAX_DEG = 100;
 const MIN_ELEVATION_RAD = THREE.MathUtils.degToRad(-5);
 const MAX_ELEVATION_RAD = THREE.MathUtils.degToRad(89);
 /** Initial gaze: facing north (az 0), tilted ~45° up the dome. */
@@ -36,8 +47,14 @@ export class ObserverSkyController {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly originalFov: number;
+  /** Published whenever the gaze heading changes (enter / drag) — drives the HUD compass. */
+  private readonly onHeadingChange?: (headingRad: number) => void;
 
   private active = false;
+  /** True while the wide dome lens is applied (mode === 'dome'); 'visual' keeps default. */
+  private domeLens = false;
+  /** Aspect the dome vertical FOV was last derived from; re-derived on change (resize/rotate). */
+  private lastAspect = 0;
   private azimuth = 0; // radians, measured from North toward East
   private elevation = INITIAL_ELEVATION_RAD; // radians, 0 = horizon, +up = zenith
 
@@ -49,10 +66,15 @@ export class ObserverSkyController {
   private readonly eye = new THREE.Vector3();
   private readonly lookTarget = new THREE.Vector3();
 
-  constructor(camera: THREE.PerspectiveCamera, controls: OrbitControls) {
+  constructor(
+    camera: THREE.PerspectiveCamera,
+    controls: OrbitControls,
+    onHeadingChange?: (headingRad: number) => void,
+  ) {
     this.camera = camera;
     this.controls = controls;
     this.originalFov = camera.fov;
+    this.onHeadingChange = onHeadingChange;
   }
 
   isActive(): boolean {
@@ -64,8 +86,14 @@ export class ObserverSkyController {
     this.active = true;
     this.azimuth = 0;
     this.elevation = INITIAL_ELEVATION_RAD;
+    this.onHeadingChange?.(this.azimuth);
     this.controls.enabled = false;
-    this.setFov(mode === 'dome' ? DOME_FOV_DEG : this.originalFov);
+    this.domeLens = mode === 'dome';
+    if (this.domeLens) {
+      this.applyDomeFov();
+    } else {
+      this.setFov(this.originalFov);
+    }
     this.applyToCamera(loc);
   }
 
@@ -78,6 +106,7 @@ export class ObserverSkyController {
   exit(): void {
     if (!this.active) return;
     this.active = false;
+    this.domeLens = false;
     this.setFov(this.originalFov);
     this.camera.up.set(0, 1, 0);
   }
@@ -91,6 +120,7 @@ export class ObserverSkyController {
       MIN_ELEVATION_RAD,
       MAX_ELEVATION_RAD,
     );
+    this.onHeadingChange?.(this.azimuth);
   }
 
   /**
@@ -101,6 +131,11 @@ export class ObserverSkyController {
   update(loc: ObserverLoc): void {
     if (!this.active) return;
     this.controls.enabled = false;
+    // Re-derive the dome's vertical FOV if the aspect changed (window resize /
+    // device rotation). The setFov equality guard makes the steady state a no-op.
+    if (this.domeLens && this.camera.aspect !== this.lastAspect) {
+      this.applyDomeFov();
+    }
     this.applyToCamera(loc);
   }
 
@@ -132,12 +167,35 @@ export class ObserverSkyController {
     this.camera.lookAt(this.lookTarget);
   }
 
+  /**
+   * Derive the vertical FOV from the dome's horizontal target + the camera's live
+   * aspect (capped to avoid portrait fisheye) and apply it. Caches the aspect so
+   * {@link update} only re-derives on change.
+   */
+  private applyDomeFov(): void {
+    const aspect = this.camera.aspect;
+    this.lastAspect = aspect;
+    this.setFov(verticalFovForHorizontal(DOME_HFOV_DEG, aspect, DOME_VFOV_MAX_DEG));
+  }
+
   private setFov(fov: number): void {
     if (this.camera.fov !== fov) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
   }
+}
+
+/**
+ * Convert a target horizontal FOV to the vertical FOV Three.js expects, for a given
+ * aspect (width/height): `vFov = 2·atan(tan(hFov/2) / aspect)`, clamped to `maxVFovDeg`.
+ * Keeps the horizontal span fixed across screen shapes (the Star Walk "cardinals at
+ * the edges" feel) instead of letting a fixed vertical FOV inflate the horizontal one.
+ */
+function verticalFovForHorizontal(hFovDeg: number, aspect: number, maxVFovDeg: number): number {
+  const hFovRad = THREE.MathUtils.degToRad(hFovDeg);
+  const vFovRad = 2 * Math.atan(Math.tan(hFovRad / 2) / aspect);
+  return Math.min(THREE.MathUtils.radToDeg(vFovRad), maxVFovDeg);
 }
 
 function wrapAngle(radians: number): number {
