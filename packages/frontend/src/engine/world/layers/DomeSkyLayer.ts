@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getObserverSceneAnchor } from '../../../orbital/coordinates';
-import { useStore } from '../../../store/useStore';
+import { useStore, isDomeView } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 /** Sky sphere radius — inside the far plane (1000); the camera is always at its centre. */
@@ -117,7 +117,9 @@ export class DomeSkyLayer implements Layer {
   update(frame: FrameContext): void {
     if (!this.mesh || !this.material || !this.camera) return;
 
-    const dome = useStore.getState().visibilityMode === 'dome';
+    // Show only while actually standing in the dome view; joyride/fly-to out of dome
+    // (cameraMode !== 'free') hides the sky so the normal space view is unobstructed.
+    const dome = isDomeView(useStore.getState());
     this.mesh.visible = dome;
     if (!dome) return;
 

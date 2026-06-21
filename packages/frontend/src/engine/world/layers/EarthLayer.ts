@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { EarthRenderer } from '../../EarthRenderer';
-import { useStore } from '../../../store/useStore';
+import { useStore, isDomeView } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 /**
@@ -40,9 +40,11 @@ export class EarthLayer implements Layer {
     // marker are parented to it and must keep tracking geography via GAST.
     this.earthRenderer.object.rotation.y = frame.gastRadians;
     this.earthRenderer.update(frame.delta, this.camera);
-    // Dome mode: drop the from‑space globe/clouds/atmosphere (DomeSkyLayer renders
-    // a ground‑level sky instead). The group stays visible for its parented layers.
-    this.earthRenderer.setSurfaceVisible(useStore.getState().visibilityMode !== 'dome');
+    // Drop the from‑space globe/clouds/atmosphere only while actually in the dome
+    // observer view (DomeSkyLayer renders a ground‑level sky instead). Joyride/fly‑to
+    // out of dome flips cameraMode away from 'free', so the Earth reappears for those.
+    // The group stays visible regardless, for its parented (compass/marker) children.
+    this.earthRenderer.setSurfaceVisible(!isDomeView(useStore.getState()));
   }
 
   dispose(): void {
