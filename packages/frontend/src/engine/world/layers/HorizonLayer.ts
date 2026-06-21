@@ -5,14 +5,11 @@ import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 type ObserverLoc = { lat: number; lon: number; alt: number };
 
-/** Tangent-plane radius of the ground disc / horizon ring, in Earth radii. */
-const GROUND_RADIUS_ER = 0.2;
-/** Cardinal-label ring radius + how far they hover above the horizon plane. */
-const LABEL_RADIUS_ER = GROUND_RADIUS_ER;
+/** Cardinal-label ring radius + how far they hover above the horizon plane, in ER. */
+const LABEL_RADIUS_ER = 0.2;
 const LABEL_LIFT_ER = 0.01;
 const LABEL_SCALE_ER = 0.0175;
 
-const LOCAL_UP = new THREE.Vector3(0, 1, 0);
 /**
  * Earth's spin axis (celestial north pole) in the Earth-group / ECEF-scene frame:
  * ECEF +Z = (0,0,1) maps through the `frames.ts` swap `(x,z,-y)` → (0,1,0). The
@@ -43,16 +40,16 @@ const MARKERS: { letter: string; angleDeg: number; major: boolean }[] = [
 ];
 
 /**
- * The sky-dome ground reference — a translucent ground disc + bright horizon ring +
- * N/E/S/W cardinal labels, pinned at the observer, giving the planetarium view a
- * "standing on the Earth, facing a direction" frame. Visible **only in dome mode**.
+ * The sky-dome direction reference — eight N/NE/E/… cardinal labels pinned at the
+ * observer on the horizon ring, giving the planetarium view a "facing a direction"
+ * frame. Visible **only in dome mode**. (No ground disc or horizon-line ring: the
+ * sky's atmospheric fade carries the horizon; a hard rim/floor read as artificial.)
  * Modeled on {@link ObserverMarkerLayer}: parents to the rotating Earth group (so it
  * tracks geography via GAST), builds lazily, and disposes its own GL. Non-critical.
  *
- * Structure: an identity-transformed container holds (a) a `surface` sub-group (disc
- * + ring, oriented +Y → local up) and (b) eight billboard letter sprites placed at the
- * true ENU 8-point compass directions (see {@link MARKERS}). Sits at the observer's
- * surface point (no lift) so it coincides with the dome camera's eye plane.
+ * Structure: an identity-transformed container holds eight billboard letter sprites
+ * placed at the true ENU 8-point compass directions (see {@link MARKERS}), sitting at
+ * the observer's surface point so they coincide with the dome camera's eye plane.
  */
 export class HorizonLayer implements Layer {
   readonly name = 'horizon';
@@ -60,8 +57,7 @@ export class HorizonLayer implements Layer {
 
   private parent: THREE.Object3D | null = null;
   private group: THREE.Group | null = null;
-  private surface: THREE.Group | null = null;
-  /** N, E, S, W sprites — placed each setLocation along the ENU cardinals. */
+  /** N/NE/E/… sprites — placed each setLocation along the ENU compass directions. */
   private labels: THREE.Sprite[] = [];
 
   init(_ctx: LayerContext): void {
@@ -98,10 +94,6 @@ export class HorizonLayer implements Layer {
     east.normalize();
     const north = new THREE.Vector3().crossVectors(up, east).normalize();
 
-    // Disc + ring: at the surface, +Y aligned to the local normal.
-    this.surface!.position.copy(p);
-    this.surface!.quaternion.setFromUnitVectors(LOCAL_UP, up);
-
     // Compass labels at the true 8-point directions, hovering just above the plane.
     // dir(θ) = north·cosθ + east·sinθ (θ from North toward East). No allocation.
     for (let i = 0; i < MARKERS.length; i++) {
@@ -128,41 +120,6 @@ export class HorizonLayer implements Layer {
   private build(): void {
     const group = new THREE.Group();
 
-    const surface = new THREE.Group();
-
-    // Ground disc — dark + translucent so the lower hemisphere reads as ground.
-    const discGeo = new THREE.CircleGeometry(GROUND_RADIUS_ER, 96);
-    discGeo.rotateX(-Math.PI / 2); // lie flat in the tangent plane (normal → +Y)
-    const discMat = new THREE.MeshBasicMaterial({
-      color: 0x05070b,
-      transparent: true,
-      opacity: 0.78,
-      side: THREE.DoubleSide,
-      depthWrite: true,
-      depthTest: true,
-    });
-    const disc = new THREE.Mesh(discGeo, discMat);
-    disc.renderOrder = 0;
-    surface.add(disc);
-
-    // Horizon ring — a bright rim marking the horizon line.
-    const ringGeo = new THREE.RingGeometry(GROUND_RADIUS_ER * 0.985, GROUND_RADIUS_ER, 96);
-    ringGeo.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x00e5ff,
-      transparent: true,
-      opacity: 0.5,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      depthTest: true,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.renderOrder = 1;
-    surface.add(ring);
-
-    group.add(surface);
-
     const labels = MARKERS.map((m) => {
       const color = m.letter === 'N' ? CARDINAL_NORTH : m.major ? CARDINAL_OTHER : CARDINAL_MINOR;
       return makeLabelSprite(m.letter, color, m.major);
@@ -170,7 +127,6 @@ export class HorizonLayer implements Layer {
     for (const sprite of labels) group.add(sprite);
 
     this.group = group;
-    this.surface = surface;
     this.labels = labels;
   }
 
@@ -188,7 +144,6 @@ export class HorizonLayer implements Layer {
       }
     });
     this.group = null;
-    this.surface = null;
     this.labels = [];
   }
 }
