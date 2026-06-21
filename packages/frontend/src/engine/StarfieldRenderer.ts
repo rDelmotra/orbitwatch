@@ -6,36 +6,41 @@ const STAR_RADIUS = 500;
 const STAR_VERT = /* glsl */ `
 attribute vec3 color;        // per-star colour (not auto-injected for ShaderMaterial)
 uniform float uSize;
-uniform vec3  uUp;           // observer zenith (scene frame), for the dome horizon fade
+uniform vec3  uClipNormal;   // points on the negative side of this plane fade out
 varying vec3  vColor;
-varying float vElev;         // star elevation above the observer horizon (sin)
+varying float vSide;         // signed projection of the star direction onto uClipNormal
 
 void main() {
   vColor = color;
   vec4 worldPos = modelMatrix * vec4(position, 1.0);
-  vElev = dot(normalize(worldPos.xyz - cameraPosition), uUp);
+  vSide = dot(normalize(worldPos.xyz - cameraPosition), uClipNormal);
   gl_Position = projectionMatrix * viewMatrix * worldPos;
   gl_PointSize = uSize;
 }
 `;
 
 const STAR_FRAG = /* glsl */ `
-uniform float uDomeActive;   // 1 while standing in the dome view, else 0
+uniform float uClipEnabled;  // 1 = fade points below the clip plane, 0 = full sphere
 varying vec3  vColor;
-varying float vElev;
+varying float vSide;
 
 void main() {
   float a = 1.0;
-  if (uDomeActive > 0.5) {
-    // Stars below the observer's horizon are under the sea — fade them out so the
-    // water reads as opaque instead of showing stars "through" it.
-    a = smoothstep(-0.06, 0.02, vElev);
+  if (uClipEnabled > 0.5) {
+    // Fade out points below the clip plane (vSide < 0).
+    a = smoothstep(-0.06, 0.02, vSide);
     if (a <= 0.001) discard;
   }
   gl_FragColor = vec4(vColor, a);
 }
 `;
 
+/**
+ * Background starfield (5000 stars). A generic backdrop primitive — it knows nothing
+ * about app modes; callers may optionally enable a generic horizon clip (fade points
+ * below a plane) via {@link setHorizonClip}. The *policy* of when/why to clip lives in
+ * the owning layer.
+ */
 export class StarfieldRenderer {
   readonly object: THREE.Points;
   private readonly material: THREE.ShaderMaterial;
@@ -69,8 +74,8 @@ export class StarfieldRenderer {
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uSize: { value: 0.5 },
-        uUp: { value: new THREE.Vector3(0, 1, 0) },
-        uDomeActive: { value: 0 },
+        uClipNormal: { value: new THREE.Vector3(0, 1, 0) },
+        uClipEnabled: { value: 0 },
       },
       vertexShader: STAR_VERT,
       fragmentShader: STAR_FRAG,
@@ -82,12 +87,13 @@ export class StarfieldRenderer {
   }
 
   /**
-   * Dome mode: fade out stars below the observer's horizon (they sit under the sea).
-   * `active=false` (any non-dome view) renders the full sphere of stars unchanged.
+   * Generic horizon clip: when `enabled`, points whose direction projects negative
+   * onto `planeNormal` fade out. `enabled=false` renders the full sphere unchanged.
+   * (The dome layer uses this with the observer zenith to hide sub-horizon stars.)
    */
-  setDomeOcclusion(up: THREE.Vector3, active: boolean): void {
-    this.material.uniforms.uUp.value.copy(up);
-    this.material.uniforms.uDomeActive.value = active ? 1 : 0;
+  setHorizonClip(planeNormal: THREE.Vector3, enabled: boolean): void {
+    this.material.uniforms.uClipNormal.value.copy(planeNormal);
+    this.material.uniforms.uClipEnabled.value = enabled ? 1 : 0;
   }
 
   dispose(): void {

@@ -22,14 +22,16 @@ export class StarfieldLayer implements Layer {
 
   update(frame: FrameContext): void {
     if (!this.renderer) return;
+    // Policy: in the dome view, clip stars below the observer's horizon (so they
+    // don't show through the sea). The renderer only knows "clip below a plane".
     const state = useStore.getState();
     const dome = isDomeView(state);
     if (dome && state.observerLocation) {
       const loc = state.observerLocation;
       this.up.copy(getObserverSceneAnchor(loc.lat, loc.lon, loc.alt, frame.date).up);
-      this.renderer.setDomeOcclusion(this.up, true);
+      this.renderer.setHorizonClip(this.up, true);
     } else {
-      this.renderer.setDomeOcclusion(this.up, false);
+      this.renderer.setHorizonClip(this.up, false);
     }
   }
 
