@@ -1,13 +1,18 @@
+import * as THREE from 'three';
 import { StarfieldRenderer } from '../../StarfieldRenderer';
+import { getObserverSceneAnchor } from '../../../orbital/coordinates';
+import { useStore, isDomeView } from '../../../store/useStore';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
-/** Background starfield (5000 stars). Fixed-cost backdrop — no per-frame work. */
+/** Background starfield (5000 stars). Backdrop; per-frame work only feeds the dome
+ *  horizon fade (so stars under the sea don't show through the water). */
 export class StarfieldLayer implements Layer {
   readonly name = 'starfield';
   readonly critical = false;
 
   private renderer: StarfieldRenderer | null = null;
   private scene: LayerContext['scene'] | null = null;
+  private readonly up = new THREE.Vector3(0, 1, 0); // scratch
 
   init(ctx: LayerContext): void {
     this.scene = ctx.scene;
@@ -15,8 +20,17 @@ export class StarfieldLayer implements Layer {
     ctx.scene.add(this.renderer.object);
   }
 
-  update(_frame: FrameContext): void {
-    // Static backdrop — nothing to update per frame.
+  update(frame: FrameContext): void {
+    if (!this.renderer) return;
+    const state = useStore.getState();
+    const dome = isDomeView(state);
+    if (dome && state.observerLocation) {
+      const loc = state.observerLocation;
+      this.up.copy(getObserverSceneAnchor(loc.lat, loc.lon, loc.alt, frame.date).up);
+      this.renderer.setDomeOcclusion(this.up, true);
+    } else {
+      this.renderer.setDomeOcclusion(this.up, false);
+    }
   }
 
   dispose(): void {
