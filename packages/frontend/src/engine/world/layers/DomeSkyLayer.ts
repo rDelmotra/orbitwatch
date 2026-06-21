@@ -106,14 +106,34 @@ vec3 seaColor(vec3 viewDir, float elev, vec3 east, vec3 north) {
   return color;
 }
 
-// Procedural ridgeline silhouette height (sin of elevation) as a function of azimuth.
-// A few sine octaves → a low, varied skyline. Peaks ~0.7°..2.9° above the horizon.
+// Hash + value noise, sampled on a circle so the ridgeline is seamless around the
+// horizon (no seam at due north) and irregular — not a periodic "frequency map".
+float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Procedural ridgeline silhouette height (sin of elevation) vs azimuth. Ridged fBm of
+// value noise → irregular, sharp-crested distant mountains (not dunes, not ripples).
 float mountainTop(float az) {
-  float h = 0.5 + 0.5 * sin(az * 150.0 + 0.4);
-  h      += 0.5 + 0.5 * sin(az * 350.0 + 1.7);
-  h      += 0.5 + 0.5 * sin(az * 650.0 + 3.1);
-  h /= 3.0;
-  return mix(0.012, 0.050, h);
+  vec2 q = vec2(cos(az), sin(az)) * 5.0;     // circle radius ~ ridge count around horizon
+  float h = 0.0;
+  float amp = 0.5;
+  for (int k = 0; k < 5; k++) {
+    float n = vnoise2(q);
+    h += amp * (1.0 - abs(2.0 * n - 1.0));   // ridged: sharp crests, cut valleys
+    q *= 2.0;
+    amp *= 0.5;
+  }
+  h = pow(clamp(h, 0.0, 1.0), 1.6);          // sharpen peaks / flatten valleys
+  return mix(0.006, 0.038, h);               // toned-down height (~0.3°..2.2°)
 }
 
 void main() {
