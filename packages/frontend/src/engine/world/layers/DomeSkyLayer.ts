@@ -109,9 +109,9 @@ vec3 seaColor(vec3 viewDir, float elev, vec3 east, vec3 north) {
 // Procedural ridgeline silhouette height (sin of elevation) as a function of azimuth.
 // A few sine octaves → a low, varied skyline. Peaks ~0.7°..2.9° above the horizon.
 float mountainTop(float az) {
-  float h = 0.5 + 0.5 * sin(az * 3.0  + 0.4);
-  h      += 0.5 + 0.5 * sin(az * 7.0  + 1.7);
-  h      += 0.5 + 0.5 * sin(az * 13.0 + 3.1);
+  float h = 0.5 + 0.5 * sin(az * 150.0 + 0.4);
+  h      += 0.5 + 0.5 * sin(az * 350.0 + 1.7);
+  h      += 0.5 + 0.5 * sin(az * 650.0 + 3.1);
   h /= 3.0;
   return mix(0.012, 0.050, h);
 }
