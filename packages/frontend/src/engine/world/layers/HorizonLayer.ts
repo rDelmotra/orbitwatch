@@ -7,8 +7,8 @@ type ObserverLoc = { lat: number; lon: number; alt: number };
 
 /** Cardinal-label ring radius + how far they hover above the horizon plane, in ER. */
 const LABEL_RADIUS_ER = 0.2;
-const LABEL_LIFT_ER = 0.01;
-const LABEL_SCALE_ER = 0.0175;
+const LABEL_LIFT_ER = 0; // exactly on the waterline
+const LABEL_SCALE_ER = 0.0057; // +30% from the prior 0.0044
 
 /**
  * Earth's spin axis (celestial north pole) in the Earth-group / ECEF-scene frame:
