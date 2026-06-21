@@ -7,7 +7,7 @@ type ObserverLoc = { lat: number; lon: number; alt: number };
 
 /** Cardinal-label ring radius + how far they hover above the horizon plane, in ER. */
 const LABEL_RADIUS_ER = 0.2;
-const LABEL_LIFT_ER = 0.0075;  // small gap just above the water (not touching it)
+const LABEL_LIFT_ER = 0.0028;  // ~half the label height: bottoms rest on the waterline
 const LABEL_SCALE_ER = 0.0057; // +30% from the prior 0.0044
 
 /**
