@@ -319,7 +319,9 @@ export class EarthRenderer {
   readonly sunDirection: THREE.Vector3 = new THREE.Vector3(1, 0, 0);
   private readonly atmosphereCameraPos: THREE.Vector3 = new THREE.Vector3();
 
+  private readonly earthMesh: THREE.Mesh;
   private readonly cloudMesh: THREE.Mesh;
+  private readonly atmosphereMesh: THREE.Mesh;
   private readonly earthMat: THREE.ShaderMaterial;
   private readonly cloudMat: THREE.ShaderMaterial;
   private readonly atmosphereMat: THREE.ShaderMaterial;
@@ -374,7 +376,8 @@ export class EarthRenderer {
       (t) => { this.earthMat.uniforms.uSpecularMap.value = t; });
 
     const earthGeo = new THREE.SphereGeometry(1.0, 128, 64);
-    this.object.add(new THREE.Mesh(earthGeo, this.earthMat));
+    this.earthMesh = new THREE.Mesh(earthGeo, this.earthMat);
+    this.object.add(this.earthMesh);
 
     // ── Cloud layer ─────────────────────────────────────────────────────────
     this.cloudMat = new THREE.ShaderMaterial({
@@ -422,7 +425,21 @@ export class EarthRenderer {
     });
 
     const atmGeo = new THREE.SphereGeometry(ATM_GEOM_RADIUS, 64, 32);
-    this.object.add(new THREE.Mesh(atmGeo, this.atmosphereMat));
+    this.atmosphereMesh = new THREE.Mesh(atmGeo, this.atmosphereMat);
+    this.object.add(this.atmosphereMesh);
+  }
+
+  /**
+   * Show/hide the from‑space surface meshes (globe + clouds + atmosphere shell)
+   * WITHOUT hiding {@link object} — the group stays visible and keeps rotating so
+   * layers parented to it (HorizonLayer compass, ObserverMarkerLayer) are unaffected.
+   * Used by {@link EarthLayer} to drop the from‑space backdrop in dome mode, where
+   * the camera sits inside the shell and it would render as artifacts.
+   */
+  setSurfaceVisible(visible: boolean): void {
+    this.earthMesh.visible = visible;
+    this.cloudMesh.visible = visible;
+    this.atmosphereMesh.visible = visible;
   }
 
   /**
