@@ -22,7 +22,25 @@ const LOCAL_UP = new THREE.Vector3(0, 1, 0);
 const SPIN_AXIS = new THREE.Vector3(0, 1, 0);
 
 const CARDINAL_NORTH = '#ff6b4a'; // North stands out (warm) for instant orientation
-const CARDINAL_OTHER = '#8fe3ff';
+const CARDINAL_OTHER = '#8fe3ff'; // E / S / W — bright cyan
+const CARDINAL_MINOR = '#6aa6c2'; // NE / SE / SW / NW — dimmer + smaller intercardinals
+
+/**
+ * 8-point compass ring (every 45°), angle measured from North toward East. Denser
+ * than just N/E/S/W so the horizon always shows a marker or two within the (narrow)
+ * dome FOV — the spacing then reads as a natural rotating ring rather than two lone
+ * letters tapering. `major` = cardinal (bigger/brighter); intercardinals are minor.
+ */
+const MARKERS: { letter: string; angleDeg: number; major: boolean }[] = [
+  { letter: 'N', angleDeg: 0, major: true },
+  { letter: 'NE', angleDeg: 45, major: false },
+  { letter: 'E', angleDeg: 90, major: true },
+  { letter: 'SE', angleDeg: 135, major: false },
+  { letter: 'S', angleDeg: 180, major: true },
+  { letter: 'SW', angleDeg: 225, major: false },
+  { letter: 'W', angleDeg: 270, major: true },
+  { letter: 'NW', angleDeg: 315, major: false },
+];
 
 /**
  * The sky-dome ground reference — a translucent ground disc + bright horizon ring +
@@ -32,9 +50,9 @@ const CARDINAL_OTHER = '#8fe3ff';
  * tracks geography via GAST), builds lazily, and disposes its own GL. Non-critical.
  *
  * Structure: an identity-transformed container holds (a) a `surface` sub-group (disc
- * + ring, oriented +Y → local up) and (b) four billboard letter sprites placed at the
- * true ENU cardinal directions. Sits at the observer's surface point (no lift) so it
- * coincides with the dome camera's eye plane.
+ * + ring, oriented +Y → local up) and (b) eight billboard letter sprites placed at the
+ * true ENU 8-point compass directions (see {@link MARKERS}). Sits at the observer's
+ * surface point (no lift) so it coincides with the dome camera's eye plane.
  */
 export class HorizonLayer implements Layer {
   readonly name = 'horizon';
@@ -84,16 +102,15 @@ export class HorizonLayer implements Layer {
     this.surface!.position.copy(p);
     this.surface!.quaternion.setFromUnitVectors(LOCAL_UP, up);
 
-    // Cardinal labels at true N / E / S / W, hovering just above the horizon plane.
-    const place = (sprite: THREE.Sprite, dir: THREE.Vector3) => {
-      sprite.position.copy(p)
-        .addScaledVector(dir, LABEL_RADIUS_ER)
+    // Compass labels at the true 8-point directions, hovering just above the plane.
+    // dir(θ) = north·cosθ + east·sinθ (θ from North toward East). No allocation.
+    for (let i = 0; i < MARKERS.length; i++) {
+      const a = THREE.MathUtils.degToRad(MARKERS[i].angleDeg);
+      this.labels[i].position.copy(p)
+        .addScaledVector(north, Math.cos(a) * LABEL_RADIUS_ER)
+        .addScaledVector(east, Math.sin(a) * LABEL_RADIUS_ER)
         .addScaledVector(up, LABEL_LIFT_ER);
-    };
-    place(this.labels[0], north);
-    place(this.labels[1], east);
-    place(this.labels[2], north.clone().negate());
-    place(this.labels[3], east.clone().negate());
+    }
   }
 
   update(_frame: FrameContext): void {
@@ -146,12 +163,10 @@ export class HorizonLayer implements Layer {
 
     group.add(surface);
 
-    const labels = [
-      makeLabelSprite('N', CARDINAL_NORTH),
-      makeLabelSprite('E', CARDINAL_OTHER),
-      makeLabelSprite('S', CARDINAL_OTHER),
-      makeLabelSprite('W', CARDINAL_OTHER),
-    ];
+    const labels = MARKERS.map((m) => {
+      const color = m.letter === 'N' ? CARDINAL_NORTH : m.major ? CARDINAL_OTHER : CARDINAL_MINOR;
+      return makeLabelSprite(m.letter, color, m.major);
+    });
     for (const sprite of labels) group.add(sprite);
 
     this.group = group;
@@ -178,32 +193,39 @@ export class HorizonLayer implements Layer {
   }
 }
 
-/** A camera-facing letter label backed by a small canvas texture. */
-function makeLabelSprite(letter: string, color: string): THREE.Sprite {
-  const size = 64;
+/**
+ * A camera-facing letter label backed by a canvas texture. `major` cardinals render
+ * bigger/brighter; intercardinals (2-char) get a wider canvas so they don't clip, and
+ * the sprite's x-scale tracks the canvas aspect so the glyphs aren't squashed.
+ */
+function makeLabelSprite(letter: string, color: string, major: boolean): THREE.Sprite {
+  const h = 64;
+  const w = letter.length > 1 ? 112 : 64; // widen for "NE"/"SE"/… so they fit
   const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
+  canvas.width = w;
+  canvas.height = h;
   const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, size, size);
+  ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = color;
-  ctx.font = 'bold 44px monospace';
+  ctx.font = `bold ${major ? 44 : 32}px monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(0,0,0,0.9)';
   ctx.shadowBlur = 6;
-  ctx.fillText(letter, size / 2, size / 2 + 2);
+  ctx.fillText(letter, w / 2, h / 2 + 2);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const material = new THREE.SpriteMaterial({
     map: texture,
     transparent: true,
+    opacity: major ? 1 : 0.72, // intercardinals recede
     depthTest: true,
     depthWrite: false,
   });
   const sprite = new THREE.Sprite(material);
-  sprite.scale.set(LABEL_SCALE_ER, LABEL_SCALE_ER, 1);
+  const scale = major ? LABEL_SCALE_ER : LABEL_SCALE_ER * 0.66;
+  sprite.scale.set(scale * (w / h), scale, 1);
   sprite.renderOrder = 2;
   return sprite;
 }

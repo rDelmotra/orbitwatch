@@ -63,6 +63,8 @@ interface AppState {
 
   observerLocation: { lat: number; lon: number; alt: number } | null;
   visibilityMode: VisibilityMode;
+  /** Dome-mode gaze heading (radians, from North toward East); drives the HUD compass. */
+  observerHeadingRad: number;
   visualList: VisualListState;
 
   categoryFilters: Record<ObjectCategory, boolean>;
@@ -102,6 +104,7 @@ interface AppState {
   clearCluster: () => void;
   setObserverLocation: (loc: { lat: number; lon: number; alt: number } | null) => void;
   setVisibilityMode: (mode: VisibilityMode) => void;
+  setObserverHeadingRad: (rad: number) => void;
   setVisualListState: (state: VisualListState) => void;
 
   // Simulation clock (UI mirrors — simClock is source of truth)
@@ -168,6 +171,7 @@ export const useStore = create<AppState>((set) => ({
 
   observerLocation: null,
   visibilityMode: 'all',
+  observerHeadingRad: 0,
   visualList: {
     status: 'loading',
     version: null,
@@ -261,6 +265,7 @@ export const useStore = create<AppState>((set) => ({
   clearCluster: () => set({ clusterItems: [] }),
   setObserverLocation: (loc) => set({ observerLocation: loc }),
   setVisibilityMode: (mode) => set({ visibilityMode: mode }),
+  setObserverHeadingRad: (rad) => set({ observerHeadingRad: rad }),
   setVisualListState: (visualList) => set({ visualList }),
 
   simRate: 1,
