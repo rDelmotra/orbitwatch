@@ -17,62 +17,121 @@ void main() {
 `;
 
 /**
- * Analytic ground‑level sky: colour by view elevation (horizon→zenith fade) with a
- * day/night blend driven by the sun's elevation, a warm twilight lobe toward the sun
- * azimuth near the horizon, and a fade to near‑black below the horizon (implied ground).
+ * Analytic ground‑level sky + sea, in ONE fragment shader (no second pass):
+ *  - `skyColor(dir)`: horizon→zenith gradient, day/night by sun elevation, warm
+ *    twilight lobe toward the sun near the horizon.
+ *  - Upward rays render the sky. Downward rays render an ambient, auto‑animated
+ *    Gerstner‑wave sea that **Fresnel‑reflects `skyColor()`** at the reflected
+ *    direction (+ sun glitter) — the "reflection" is just the sky function sampled
+ *    again, so no reflection camera / render target is needed.
+ * The sea is purely visual: it animates from `uTime` and nothing interacts with it.
  * `cameraPosition` is auto‑injected by three for ShaderMaterial.
  */
 const SKY_FRAG = /* glsl */ `
-uniform vec3 uUp;      // observer zenith, scene frame
-uniform vec3 uSunDir;  // sun unit vector, scene frame
+uniform vec3  uUp;      // observer zenith, scene frame
+uniform vec3  uSunDir;  // sun unit vector, scene frame
+uniform float uTime;    // seconds (wall‑clock accumulator) — drives the waves
 
 varying vec3 vWorldPos;
 
-void main() {
-  vec3 viewDir = normalize(vWorldPos - cameraPosition);
-  vec3 sunDir  = normalize(uSunDir);
+const vec3  SPIN_AXIS    = vec3(0.0, 1.0, 0.0); // scene‑frame Earth spin axis (TEME +Z)
+const float EYE_HEIGHT_M = 2.0;                  // artistic eye height above the sea
 
-  float elev    = dot(viewDir, uUp);   // 1 = zenith, 0 = horizon, <0 = below
-  float sunElev = dot(sunDir, uUp);    // sine of the sun's elevation
-
-  // Night → day across civil twilight.
+// Pure upper‑hemisphere sky colour for any direction. No below‑horizon term — that's
+// the sea (below). Reused by the sea as its reflection source.
+vec3 skyColor(vec3 dir) {
+  float elev    = dot(dir, uUp);
+  float sunElev = dot(uSunDir, uUp);
   float dayness = smoothstep(-0.18, 0.10, sunElev);
 
   vec3 zenithDay    = vec3(0.18, 0.42, 0.82);
   vec3 horizonDay   = vec3(0.62, 0.76, 0.92);
   vec3 zenithNight  = vec3(0.012, 0.020, 0.055);
   vec3 horizonNight = vec3(0.040, 0.060, 0.130);
-
   vec3 zenithColor  = mix(zenithNight, zenithDay, dayness);
   vec3 horizonColor = mix(horizonNight, horizonDay, dayness);
 
   float g = smoothstep(0.0, 0.55, max(elev, 0.0));
-  vec3 color = mix(horizonColor, zenithColor, g);
+  vec3 col = mix(horizonColor, zenithColor, g);
 
-  // Warm twilight glow toward the sun, strongest near the horizon while the sun
-  // sits just below/above it. Gated to CIVIL twilight + golden hour: sunElev is
-  // sin(sun altitude), so the band rides ~ -7° (sin -0.12) up through the horizon
-  // and fades out by ~ +7° (sin +0.12). Past civil twilight the night sky is dim
-  // blue, not orange — this is what keeps the glow honest after the sun has set.
-  float towardSun        = max(dot(viewDir, sunDir), 0.0);
+  // Warm twilight glow toward the sun, civil‑twilight gated (sunElev = sin altitude).
+  float towardSun        = max(dot(dir, normalize(uSunDir)), 0.0);
   float twilightWindow   = smoothstep(-0.12, -0.02, sunElev) * (1.0 - smoothstep(0.02, 0.12, sunElev));
   float horizonProximity = 1.0 - smoothstep(0.0, 0.32, abs(elev));
-  float glow = pow(towardSun, 3.0) * twilightWindow * horizonProximity;
-  color += vec3(1.0, 0.46, 0.20) * glow * 0.6;
+  col += vec3(1.0, 0.46, 0.20) * (pow(towardSun, 3.0) * twilightWindow * horizonProximity) * 0.6;
+  return col;
+}
 
-  // Below the horizon: fade to near‑black (implied ground; there is no floor object).
-  float belowFade = smoothstep(0.0, -0.25, elev);
-  color = mix(color, vec3(0.004), belowFade);
+// One Gerstner wave's contribution to the surface normal (height‑field form):
+// returns (∂east, up‑term, ∂north) accumulated into the tangent‑frame normal.
+vec3 waveContribution(vec2 p, vec2 dir, float L, float A, float Q, float spd, float flatten) {
+  vec2  D  = normalize(dir);
+  float k  = 6.2831853 / L;
+  float ph = k * dot(D, p) + uTime * spd;
+  float WA = k * A * flatten;
+  return vec3(-D.x * WA * cos(ph), -Q * WA * sin(ph), -D.y * WA * cos(ph));
+}
+
+void main() {
+  vec3  viewDir = normalize(vWorldPos - cameraPosition);
+  float elev    = dot(viewDir, uUp);   // 1 = zenith, 0 = horizon, <0 = below
+
+  if (elev >= 0.0) {
+    gl_FragColor = vec4(skyColor(viewDir), 1.0);
+    return;
+  }
+
+  // ── Below the horizon: ambient Gerstner sea, Fresnel‑reflecting the sky ──────
+  // Local tangent basis (east/north) for wave coordinates; pole‑safe.
+  vec3 east = cross(SPIN_AXIS, uUp);
+  if (dot(east, east) < 1e-6) east = cross(vec3(1.0, 0.0, 0.0), uUp);
+  east = normalize(east);
+  vec3 north = normalize(cross(uUp, east));
+
+  // Intersect the eye ray with the sea plane EYE_HEIGHT_M below the eye.
+  float down = max(-elev, 1e-4);
+  float t    = EYE_HEIGHT_M / down;     // metres along the ray to the water
+  vec3  hit  = viewDir * t;             // offset from the eye, metres
+  vec2  p    = vec2(dot(hit, east), dot(hit, north));
+
+  // Flatten waves toward the horizon (far + grazing) to kill shimmer/aliasing and
+  // keep the water→sky seam mirror‑smooth.
+  float flatten = smoothstep(0.0, 0.14, -elev);
+
+  vec3 g = vec3(0.0, 1.0, 0.0);
+  g += waveContribution(p, vec2( 1.0,  0.6), 6.0, 0.100, 0.5, 0.9, flatten);
+  g += waveContribution(p, vec2(-0.7,  1.0), 3.1, 0.050, 0.5, 1.2, flatten);
+  g += waveContribution(p, vec2( 0.3, -1.0), 1.7, 0.025, 0.4, 1.6, flatten);
+  g += waveContribution(p, vec2(-1.0, -0.4), 0.9, 0.012, 0.3, 2.1, flatten);
+  vec3 N = normalize(east * g.x + uUp * g.y + north * g.z);
+
+  vec3  V       = -viewDir;
+  float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+  vec3  reflDir = reflect(viewDir, N);
+  vec3  refl    = skyColor(reflDir);
+
+  float sunElev = dot(uSunDir, uUp);
+  float dayness = smoothstep(-0.18, 0.10, sunElev);
+  vec3  deep    = mix(vec3(0.010, 0.020, 0.035), vec3(0.05, 0.12, 0.16), dayness);
+
+  vec3 color = mix(deep, refl, fresnel);
+
+  // Sun glitter on the wave facets — only while the sun is above the horizon.
+  float glitter = pow(max(dot(reflDir, normalize(uSunDir)), 0.0), 120.0);
+  float sunUp   = smoothstep(-0.05, 0.10, sunElev);
+  color += vec3(1.0, 0.9, 0.7) * glitter * sunUp * 0.8;
 
   gl_FragColor = vec4(color, 1.0);
 }
 `;
 
 /**
- * The dome planetarium sky — a camera‑centred gradient sky shown **only in dome mode**,
- * replacing the from‑space Earth/atmosphere backdrop (which the {@link EarthLayer} hides
- * in dome mode). Drawn first (`renderOrder = -1000`, depth test off) so stars, satellites
- * and the compass render on top. Non‑critical; owns + disposes its own GL.
+ * The dome planetarium sky **and sea** — a camera‑centred sphere shown **only in dome
+ * mode**, replacing the from‑space Earth/atmosphere backdrop (which the {@link EarthLayer}
+ * hides in dome mode). Upper hemisphere = gradient sky; lower hemisphere = an ambient
+ * Gerstner sea that Fresnel‑reflects that same sky. Drawn first (`renderOrder = -1000`,
+ * depth test off) so stars, satellites and the compass render on top. Non‑critical;
+ * owns + disposes its own GL.
  *
  * Why a dedicated sky: in dome mode the camera sits ~16 m above the surface, *inside* the
  * from‑space atmosphere shell, where its raymarch (built for camera‑outside viewing) plus
@@ -88,6 +147,8 @@ export class DomeSkyLayer implements Layer {
   private mesh: THREE.Mesh | null = null;
   private material: THREE.ShaderMaterial | null = null;
   private readonly up = new THREE.Vector3(0, 1, 0); // per-frame scratch (no alloc)
+  /** Wall-clock seconds (accumulated from frame.delta) driving the wave phase. */
+  private waveTime = 0;
 
   init(ctx: LayerContext): void {
     this.scene = ctx.scene;
@@ -97,6 +158,7 @@ export class DomeSkyLayer implements Layer {
       uniforms: {
         uUp: { value: new THREE.Vector3(0, 1, 0) },
         uSunDir: { value: new THREE.Vector3(1, 0, 0) },
+        uTime: { value: 0 },
       },
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
@@ -134,6 +196,11 @@ export class DomeSkyLayer implements Layer {
     }
     this.material.uniforms.uUp.value.copy(this.up);
     this.material.uniforms.uSunDir.value.copy(frame.sunDirectionECI);
+
+    // Advance the (ambient, non-interactive) waves on wall-clock time so they're
+    // smooth regardless of sim-time scrubbing/scaling.
+    this.waveTime += frame.delta;
+    this.material.uniforms.uTime.value = this.waveTime;
   }
 
   dispose(): void {
