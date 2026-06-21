@@ -72,30 +72,14 @@ vec3 waveContribution(vec2 p, vec2 dir, float L, float A, float Q, float spd, fl
   return vec3(-D.x * WA * cos(ph), -Q * WA * sin(ph), -D.y * WA * cos(ph));
 }
 
-void main() {
-  vec3  viewDir = normalize(vWorldPos - cameraPosition);
-  float elev    = dot(viewDir, uUp);   // 1 = zenith, 0 = horizon, <0 = below
-
-  if (elev >= 0.0) {
-    gl_FragColor = vec4(skyColor(viewDir), 1.0);
-    return;
-  }
-
-  // ── Below the horizon: ambient Gerstner sea, Fresnel‑reflecting the sky ──────
-  // Local tangent basis (east/north) for wave coordinates; pole‑safe.
-  vec3 east = cross(SPIN_AXIS, uUp);
-  if (dot(east, east) < 1e-6) east = cross(vec3(1.0, 0.0, 0.0), uUp);
-  east = normalize(east);
-  vec3 north = normalize(cross(uUp, east));
-
-  // Intersect the eye ray with the sea plane EYE_HEIGHT_M below the eye.
+// Ambient Gerstner sea for a below‑horizon ray (elev < 0): Fresnel‑reflects the sky.
+vec3 seaColor(vec3 viewDir, float elev, vec3 east, vec3 north) {
   float down = max(-elev, 1e-4);
   float t    = EYE_HEIGHT_M / down;     // metres along the ray to the water
   vec3  hit  = viewDir * t;             // offset from the eye, metres
   vec2  p    = vec2(dot(hit, east), dot(hit, north));
 
-  // Flatten waves toward the horizon (far + grazing) to kill shimmer/aliasing and
-  // keep the water→sky seam mirror‑smooth.
+  // Flatten waves toward the horizon (far + grazing) to kill shimmer/aliasing.
   float flatten = smoothstep(0.0, 0.14, -elev);
 
   vec3 g = vec3(0.0, 1.0, 0.0);
@@ -112,17 +96,56 @@ void main() {
 
   float sunElev = dot(uSunDir, uUp);
   float dayness = smoothstep(-0.18, 0.10, sunElev);
-  // Deeper, more saturated body so the sea reads as opaque water (not a dark void)
-  // even looking straight down where Fresnel reflection is weak.
   vec3  deep    = mix(vec3(0.020, 0.050, 0.075), vec3(0.06, 0.16, 0.21), dayness);
 
-  // Bias slightly toward the reflection floor so the surface always has some sheen.
   vec3 color = mix(deep, refl, clamp(fresnel + 0.06, 0.0, 1.0));
 
-  // Sun glitter on the wave facets — only while the sun is above the horizon.
   float glitter = pow(max(dot(reflDir, normalize(uSunDir)), 0.0), 120.0);
   float sunUp   = smoothstep(-0.05, 0.10, sunElev);
   color += vec3(1.0, 0.9, 0.7) * glitter * sunUp * 0.8;
+  return color;
+}
+
+// Procedural ridgeline silhouette height (sin of elevation) as a function of azimuth.
+// A few sine octaves → a low, varied skyline. Peaks ~0.7°..2.9° above the horizon.
+float mountainTop(float az) {
+  float h = 0.5 + 0.5 * sin(az * 3.0  + 0.4);
+  h      += 0.5 + 0.5 * sin(az * 7.0  + 1.7);
+  h      += 0.5 + 0.5 * sin(az * 13.0 + 3.1);
+  h /= 3.0;
+  return mix(0.012, 0.050, h);
+}
+
+void main() {
+  vec3  viewDir = normalize(vWorldPos - cameraPosition);
+  float elev    = dot(viewDir, uUp);   // 1 = zenith, 0 = horizon, <0 = below
+
+  // Local tangent basis (azimuth + wave coords); pole‑safe.
+  vec3 east = cross(SPIN_AXIS, uUp);
+  if (dot(east, east) < 1e-6) east = cross(vec3(1.0, 0.0, 0.0), uUp);
+  east = normalize(east);
+  vec3 north = normalize(cross(uUp, east));
+
+  // Base scene: sky above the horizon, ambient sea below.
+  vec3 color = (elev >= 0.0) ? skyColor(viewDir) : seaColor(viewDir, elev, east, north);
+
+  // ── Procedural horizon mountains — a low silhouette covering the seam ────────
+  // The ridge rises ~1‑3° above the horizon and its foot sits ~3° BELOW it, fading
+  // into the sea (perceived "submerged / emerging from the water" base).
+  const float FOOT = -0.05;                         // submerged foot (sin ≈ -3°)
+  float az  = atan(dot(viewDir, east), dot(viewDir, north));
+  float top = mountainTop(az);
+  float ridge     = smoothstep(top, top - 0.004, elev);  // 1 below the ridgeline
+  float depthFade = smoothstep(FOOT, 0.0, elev);         // fade out below the waterline
+  float mtnAlpha  = ridge * depthFade;
+
+  float ds = smoothstep(-0.18, 0.10, dot(uSunDir, uUp));
+  vec3  mountainColor = mix(vec3(0.015, 0.022, 0.035), vec3(0.10, 0.13, 0.17), ds);
+  // Submerged part (below the waterline) reads as under the sea: blend toward water.
+  float submerge = clamp(-elev / -FOOT, 0.0, 1.0) * step(elev, 0.0);
+  mountainColor = mix(mountainColor, color, submerge * 0.7);
+
+  color = mix(color, mountainColor, mtnAlpha);
 
   gl_FragColor = vec4(color, 1.0);
 }
@@ -132,9 +155,10 @@ void main() {
  * The dome planetarium sky **and sea** — a camera‑centred sphere shown **only in dome
  * mode**, replacing the from‑space Earth/atmosphere backdrop (which the {@link EarthLayer}
  * hides in dome mode). Upper hemisphere = gradient sky; lower hemisphere = an ambient
- * Gerstner sea that Fresnel‑reflects that same sky. Drawn first (`renderOrder = -1000`,
- * depth test off) so stars, satellites and the compass render on top. Non‑critical;
- * owns + disposes its own GL.
+ * Gerstner sea that Fresnel‑reflects that same sky; a low procedural mountain ridge
+ * straddles the horizon (submerged foot fading into the sea) to cover the seam. Drawn
+ * first (`renderOrder = -1000`, depth test off) so stars, satellites and the compass
+ * render on top. Non‑critical; owns + disposes its own GL.
  *
  * Why a dedicated sky: in dome mode the camera sits ~16 m above the surface, *inside* the
  * from‑space atmosphere shell, where its raymarch (built for camera‑outside viewing) plus
