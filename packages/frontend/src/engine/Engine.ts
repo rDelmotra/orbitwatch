@@ -22,6 +22,7 @@ import { DsoLayer } from './world/layers/DsoLayer';
 import { SatellitesLayer } from './world/layers/SatellitesLayer';
 import { ObserverMarkerLayer } from './world/layers/ObserverMarkerLayer';
 import { HorizonLayer } from './world/layers/HorizonLayer';
+import { DomeSkyLayer } from './world/layers/DomeSkyLayer';
 import { registerEngineCommands, type EngineCommands } from './command/EngineCommands';
 import type { FrameContext } from './render/Layer';
 
@@ -81,6 +82,9 @@ export class Engine {
       onCriticalError: (err) => this.handleCriticalError(err),
     });
     this.world.register(this.earthLayer);
+    // Dome-only gradient sky backdrop (drawn first via renderOrder; replaces the
+    // from-space Earth/atmosphere when standing on the surface in dome mode).
+    this.world.register(new DomeSkyLayer());
     this.world.register(this.observerMarkerLayer);
     // Parents to the Earth group (like the observer marker), so its scene-root
     // registration order is irrelevant; dome-only visibility toggled in update().
