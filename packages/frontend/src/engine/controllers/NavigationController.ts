@@ -389,6 +389,11 @@ export class NavigationController {
     this.observerSky.addLookInput(deltaAzRad, deltaElRad);
   }
 
+  /** Forward a dome scroll/pinch zoom factor (<1 zoom in, >1 zoom out) into the rig. */
+  addDomeZoom(factor: number): void {
+    this.observerSky.zoom(factor);
+  }
+
   dispose(): void {
     this.cameraModeUnsub?.();
     this.cameraModeUnsub = null;

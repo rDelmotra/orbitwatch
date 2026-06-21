@@ -141,6 +141,7 @@ export class Engine {
           onDragExitFollow: () => this.nav.notifyDragExitedFollowing(),
           onJoyrideLookInput: (dx, dy) => this.nav.addJoyrideLookInput(dx, dy),
           onDomeLookInput: (dAz, dEl) => this.nav.addDomeLookInput(dAz, dEl),
+          onDomeZoom: (factor) => this.nav.addDomeZoom(factor),
         },
       );
     }

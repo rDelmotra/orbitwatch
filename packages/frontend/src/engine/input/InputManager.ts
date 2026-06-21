@@ -11,6 +11,8 @@ import { useStore } from '../../store/useStore';
 const EARTH_RADIUS_KM = 6371;
 const CLUSTER_RADIUS_SQ = 0.0078 * 0.0078; // ~50 km in scene units, squared
 const HOVER_THROTTLE_MS = 100;
+/** Wheel zoom feel: FOV factor = exp(deltaY · k). Scroll up (deltaY<0) zooms in. */
+const WHEEL_ZOOM_K = 0.0014;
 
 // ── InputManager ─────────────────────────────────────────────────────────────
 
@@ -27,6 +29,7 @@ export class InputManager {
   private readonly onDragExitFollow: () => void;
   private readonly onJoyrideLookInput: (dx: number, dy: number) => void;
   private readonly onDomeLookInput: (dAz: number, dEl: number) => void;
+  private readonly onDomeZoom: (factor: number) => void;
 
   private gpuPicker: GPUPicker | null = null;
   private catalogData: EnrichedTLEObject[] = [];
@@ -36,6 +39,10 @@ export class InputManager {
   private joyrideLookPointerPos: { x: number; y: number } | null = null;
   private domeLookPointerPos: { x: number; y: number } | null = null;
   private lastHoverTime = 0;
+
+  // Live pointers (by id) + last pinch separation — for two-finger dome zoom.
+  private readonly activePointers = new Map<number, { x: number; y: number }>();
+  private pinchPrevDist: number | null = null;
 
   constructor(
     deps: {
@@ -51,6 +58,7 @@ export class InputManager {
       onDragExitFollow: () => void;
       onJoyrideLookInput: (dx: number, dy: number) => void;
       onDomeLookInput: (dAz: number, dEl: number) => void;
+      onDomeZoom: (factor: number) => void;
     },
   ) {
     this.canvas = deps.canvas;
@@ -64,10 +72,14 @@ export class InputManager {
     this.onDragExitFollow = callbacks.onDragExitFollow;
     this.onJoyrideLookInput = callbacks.onJoyrideLookInput;
     this.onDomeLookInput = callbacks.onDomeLookInput;
+    this.onDomeZoom = callbacks.onDomeZoom;
 
     this.canvas.addEventListener('pointerdown', this.handlePointerDown);
     this.canvas.addEventListener('pointerup', this.handlePointerUp);
+    this.canvas.addEventListener('pointercancel', this.handlePointerUp);
     this.canvas.addEventListener('pointermove', this.handlePointerMove);
+    // Non-passive so we can preventDefault the page scroll while zooming the dome.
+    this.canvas.addEventListener('wheel', this.handleWheel, { passive: false });
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -93,10 +105,21 @@ export class InputManager {
   dispose(): void {
     this.canvas.removeEventListener('pointerdown', this.handlePointerDown);
     this.canvas.removeEventListener('pointerup', this.handlePointerUp);
+    this.canvas.removeEventListener('pointercancel', this.handlePointerUp);
     this.canvas.removeEventListener('pointermove', this.handlePointerMove);
+    this.canvas.removeEventListener('wheel', this.handleWheel);
   }
 
   // ── Private ─────────────────────────────────────────────────────────────
+
+  /** Dome lens active = free camera + dome mode + a known observer location. */
+  private isDomeActive(state: ReturnType<typeof useStore.getState>): boolean {
+    return (
+      state.cameraMode === 'free' &&
+      state.visibilityMode === 'dome' &&
+      state.observerLocation !== null
+    );
+  }
 
   private syncPickerUniforms(): void {
     if (!this.gpuPicker) return;
@@ -107,8 +130,27 @@ export class InputManager {
     );
   }
 
+  /** Scroll wheel → dome FOV zoom (the Star Walk lens). No-op outside dome mode. */
+  private handleWheel = (e: WheelEvent): void => {
+    if (!this.isDomeActive(useStore.getState())) return;
+    e.preventDefault(); // suppress page scroll while zooming the sky
+    // Scroll up (deltaY < 0) narrows the FOV (factor < 1) → zoom in.
+    this.onDomeZoom(Math.exp(e.deltaY * WHEEL_ZOOM_K));
+  };
+
   private handlePointerDown = (e: PointerEvent): void => {
     const state = useStore.getState();
+
+    // Track every active pointer so a second finger can drive pinch-zoom.
+    this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.activePointers.size >= 2 && this.isDomeActive(state)) {
+      // Second finger down in dome mode: start a pinch, cancel the one-finger pan.
+      this.pinchPrevDist = this.currentPinchDist();
+      this.domeLookPointerPos = null;
+      this.pointerDownPos = null;
+      return;
+    }
+
     if (state.cameraMode === 'following' && state.trackingStyle === 'joyride') {
       this.joyrideLookPointerPos = { x: e.clientX, y: e.clientY };
       return;
@@ -121,10 +163,37 @@ export class InputManager {
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
   };
 
+  /** Euclidean distance between the first two active pointers (pinch separation). */
+  private currentPinchDist(): number | null {
+    const pts = Array.from(this.activePointers.values());
+    if (pts.length < 2) return null;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
   private handlePointerMove = (e: PointerEvent): void => {
     const state = useStore.getState();
     const mode = state.cameraMode;
     const isJoyrideFreeLook = mode === 'following' && state.trackingStyle === 'joyride';
+
+    // Keep the live pointer position current for pinch math.
+    if (this.activePointers.has(e.pointerId)) {
+      this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    // Two-finger pinch → dome FOV zoom (takes precedence over pan).
+    if (this.pinchPrevDist !== null && this.activePointers.size >= 2) {
+      if (!this.isDomeActive(state)) {
+        this.pinchPrevDist = null;
+      } else {
+        const dist = this.currentPinchDist();
+        if (dist && dist > 0 && this.pinchPrevDist > 0) {
+          // Fingers apart (dist↑) → factor < 1 → narrow FOV → zoom in.
+          this.onDomeZoom(this.pinchPrevDist / dist);
+          this.pinchPrevDist = dist;
+        }
+        return;
+      }
+    }
 
     if (this.joyrideLookPointerPos) {
       if (!isJoyrideFreeLook) {
@@ -217,6 +286,11 @@ export class InputManager {
   };
 
   private handlePointerUp = (e: PointerEvent): void => {
+    this.activePointers.delete(e.pointerId);
+    if (this.activePointers.size < 2) this.pinchPrevDist = null;
+    // (A pinch already nulled pointerDownPos/domeLookPointerPos, so a lifted finger
+    //  can't fall through to a tap-select or a one-finger pan here.)
+
     if (this.joyrideLookPointerPos) {
       this.joyrideLookPointerPos = null;
       this.pointerDownPos = null;
