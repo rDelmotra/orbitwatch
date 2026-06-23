@@ -24,8 +24,7 @@ const CATALOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 export function buildCatalogResult(catalogData: EnrichedTLEObject[]): TleCatalogResult {
   const tles: TLEInput[] = catalogData.map((d) => ({
     noradId: d.noradId,
-    line1: d.line1,
-    line2: d.line2,
+    omm: d.omm,
   }));
 
   const categoryCounts: Record<ObjectCategory, number> = {

@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import type { OMMJsonObject } from 'satellite.js';
 import { buildCatalogResult } from './tle-client';
 import type { EnrichedTLEObject } from './types';
+
+function makeTestOmm(noradId: number): OMMJsonObject {
+  return {
+    OBJECT_NAME: `OBJ-${noradId}`,
+    OBJECT_ID: '2000-001A',
+    EPOCH: '2026-06-19T00:00:00.000000Z',
+    MEAN_MOTION: 15.5,
+    ECCENTRICITY: 0.0001,
+    INCLINATION: 51.6,
+    RA_OF_ASC_NODE: 0,
+    ARG_OF_PERICENTER: 0,
+    MEAN_ANOMALY: 0,
+    EPHEMERIS_TYPE: 0,
+    CLASSIFICATION_TYPE: 'U',
+    NORAD_CAT_ID: noradId,
+    ELEMENT_SET_NO: 999,
+    REV_AT_EPOCH: 0,
+    BSTAR: 0,
+    MEAN_MOTION_DOT: 0,
+    MEAN_MOTION_DDOT: 0,
+  };
+}
 
 function obj(
   noradId: number,
@@ -11,8 +34,7 @@ function obj(
   return {
     noradId,
     name: `OBJ-${noradId}`,
-    line1: `1 ${noradId}`,
-    line2: `2 ${noradId}`,
+    omm: makeTestOmm(noradId),
     objectType: 'satellite',
     category,
     regime,
@@ -39,9 +61,9 @@ describe('buildCatalogResult', () => {
 
     assert.equal(result.catalogData, catalogData);
     assert.deepEqual(result.tles, [
-      { noradId: 1, line1: '1 1', line2: '2 1' },
-      { noradId: 2, line1: '1 2', line2: '2 2' },
-      { noradId: 3, line1: '1 3', line2: '2 3' },
+      { noradId: 1, omm: makeTestOmm(1) },
+      { noradId: 2, omm: makeTestOmm(2) },
+      { noradId: 3, omm: makeTestOmm(3) },
     ]);
     assert.equal(result.categoryCounts.active_satellite, 2);
     assert.equal(result.categoryCounts.debris, 1);

@@ -16,10 +16,11 @@
 
 // ── Types (mirror the worker's exported types locally) ────────────────────────
 
+import type { OMMJsonObject } from 'satellite.js';
+
 interface TLEInput {
     noradId: number;
-    line1: string;
-    line2: string;
+    omm: OMMJsonObject;
 }
 
 type WorkerOutMessage =
@@ -51,17 +52,51 @@ const testTLEs: (TLEInput & { label: string; minMag: number; maxMag: number })[]
     {
         label: 'ISS (LEO)',
         noradId: 25544,
-        // TLE epoch 2024-001 — valid for ± days around epoch for a smoke test
-        line1: '1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9993',
-        line2: '2 25544  51.6400 337.6640 0007776  35.5310 330.3680 15.50377579 10001',
+        // OMM @ epoch 2024-001 12:00 UTC — valid for ± days around epoch for a smoke test
+        omm: {
+            OBJECT_NAME: 'ISS (ZARYA)',
+            OBJECT_ID: '1998-067A',
+            EPOCH: '2024-01-01T12:00:00.000000Z',
+            MEAN_MOTION: 15.50377579,
+            ECCENTRICITY: 0.0007776,
+            INCLINATION: 51.64,
+            RA_OF_ASC_NODE: 337.664,
+            ARG_OF_PERICENTER: 35.531,
+            MEAN_ANOMALY: 330.368,
+            EPHEMERIS_TYPE: 0,
+            CLASSIFICATION_TYPE: 'U',
+            NORAD_CAT_ID: 25544,
+            ELEMENT_SET_NO: 999,
+            REV_AT_EPOCH: 10001,
+            BSTAR: 0.10270e-3,
+            MEAN_MOTION_DOT: 0.00016717,
+            MEAN_MOTION_DDOT: 0,
+        },
         minMag: 1.03,
         maxMag: 1.10,
     },
     {
         label: 'Intelsat 39 (GEO)',
         noradId: 45700,
-        line1: '1 45700U 20041A   24001.50000000 -.00000302  00000-0  00000-0 0  9994',
-        line2: '2 45700   0.0152  98.6287 0001765 214.0080 228.2349  1.00271318 13494',
+        omm: {
+            OBJECT_NAME: 'INTELSAT 39',
+            OBJECT_ID: '2020-041A',
+            EPOCH: '2024-01-01T12:00:00.000000Z',
+            MEAN_MOTION: 1.00271318,
+            ECCENTRICITY: 0.0001765,
+            INCLINATION: 0.0152,
+            RA_OF_ASC_NODE: 98.6287,
+            ARG_OF_PERICENTER: 214.008,
+            MEAN_ANOMALY: 228.2349,
+            EPHEMERIS_TYPE: 0,
+            CLASSIFICATION_TYPE: 'U',
+            NORAD_CAT_ID: 45700,
+            ELEMENT_SET_NO: 999,
+            REV_AT_EPOCH: 13494,
+            BSTAR: 0,
+            MEAN_MOTION_DOT: -0.00000302,
+            MEAN_MOTION_DDOT: 0,
+        },
         minMag: 6.50,
         maxMag: 6.70,
     },

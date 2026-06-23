@@ -378,7 +378,7 @@ export class Engine {
       const sat = this.catalogData[selectedIndex];
       const anchorMs = this.satellitesLayer.getPropagationTimestampMs();
       this.world.runLayerCommand(this.trailsLayer, 'generate', () =>
-        this.trailsLayer.generate(sat.line1, sat.line2, anchorMs),
+        this.trailsLayer.generate(sat.omm, anchorMs),
       );
       return;
     }

@@ -11,13 +11,13 @@
  */
 
 import * as satellite from 'satellite.js';
+import type { OMMJsonObject } from 'satellite.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface TLEInput {
     noradId: number;
-    line1: string;
-    line2: string;
+    omm: OMMJsonObject;
 }
 
 type WorkerInMessage =
@@ -117,7 +117,7 @@ function handleInit(tles: TLEInput[], start: number): void {
 
     for (let i = 0; i < objectCount; i++) {
         try {
-            satrecs[i] = satellite.twoline2satrec(tles[i].line1, tles[i].line2);
+            satrecs[i] = satellite.json2satrec(tles[i].omm);
         } catch {
             // If parsing fails, store a placeholder — propagate will flag it invalid
             satrecs[i] = null as unknown as satellite.SatRec;

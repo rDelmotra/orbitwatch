@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as satellite from 'satellite.js';
+import type { OMMJsonObject } from 'satellite.js';
 import { simClock } from './SimClock';
 import { sourceToSceneInto, writeSourceToScene } from '../orbital/frames';
 
@@ -98,11 +99,11 @@ export class OrbitTrailRenderer {
     }
   }
 
-  generate(line1: string, line2: string, anchorTimeMs = simClock.now()): void {
+  generate(omm: OMMJsonObject, anchorTimeMs = simClock.now()): void {
     // Clear any existing trail first
     this.clear();
 
-    const satrec = satellite.twoline2satrec(line1, line2);
+    const satrec = satellite.json2satrec(omm);
 
     // Derive orbital period from mean motion (radians/minute)
     const periodMinutes = (2 * Math.PI) / satrec.no;

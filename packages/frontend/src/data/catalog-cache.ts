@@ -18,7 +18,9 @@ import type { EnrichedTLEObject } from './types';
 // ============================================================
 
 const DB_NAME = 'orbitwatch';
-const DB_VERSION = 1;
+// v2: catalog objects carry `omm` (OMM JSON) instead of `line1`/`line2`. The
+// version bump + store recreate below clears pre-OMM caches on first load.
+const DB_VERSION = 2;
 const STORE = 'tle-catalog';
 const KEY = 'catalog';
 
@@ -45,7 +47,11 @@ function openDb(): Promise<IDBDatabase | null> {
     }
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      // On a version bump, drop any prior store so stale-shaped records (e.g. the
+      // pre-OMM line1/line2 catalog) are cleared rather than silently reused —
+      // a plain createObjectStore-if-absent would leave old records in place.
+      if (db.objectStoreNames.contains(STORE)) db.deleteObjectStore(STORE);
+      db.createObjectStore(STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => resolve(null);
@@ -61,7 +67,16 @@ export async function readCatalogCache(): Promise<CatalogCacheRecord | null> {
     try {
       const tx = db.transaction(STORE, 'readonly');
       const req = tx.objectStore(STORE).get(KEY);
-      req.onsuccess = () => resolve((req.result as CatalogCacheRecord | undefined) ?? null);
+      req.onsuccess = () => {
+        const record = (req.result as CatalogCacheRecord | undefined) ?? null;
+        // Defensive: ignore a cache whose objects predate the OMM migration (no
+        // `omm` field) so we never feed line1/line2-shaped data to json2satrec.
+        if (record && record.catalogData[0] && !('omm' in record.catalogData[0])) {
+          resolve(null);
+          return;
+        }
+        resolve(record);
+      };
       req.onerror = () => resolve(null);
       tx.oncomplete = () => db.close();
       tx.onerror = () => db.close();

@@ -1,4 +1,5 @@
 import { OrbitTrailRenderer } from '../../OrbitTrailRenderer';
+import type { OMMJsonObject } from 'satellite.js';
 import type { FrameContext, Layer, LayerContext } from '../../render/Layer';
 
 /**
@@ -23,8 +24,8 @@ export class TrailsLayer implements Layer {
 
   // ── Engine-driven orchestration (selection / time-jump) ─────────────────────
 
-  generate(line1: string, line2: string, anchorTimeMs: number): void {
-    this.renderer?.generate(line1, line2, anchorTimeMs);
+  generate(omm: OMMJsonObject, anchorTimeMs: number): void {
+    this.renderer?.generate(omm, anchorTimeMs);
   }
 
   generateFromPositions(positionsTeme: Float32Array): void {

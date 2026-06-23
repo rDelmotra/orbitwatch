@@ -1,7 +1,8 @@
+import type { OMMJsonObject } from 'satellite.js';
+
 export interface TLEInput {
     noradId: number
-    line1: string
-    line2: string
+    omm: OMMJsonObject
 }
 
 export type ObjectCategory = 'active_satellite' | 'inactive_satellite' | 'rocket_body' | 'debris' | 'unknown' | 'deep_space';
@@ -10,8 +11,7 @@ export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER';
 export interface EnrichedTLEObject {
   noradId: number;
   name: string;
-  line1: string;
-  line2: string;
+  omm: OMMJsonObject;
   objectType: 'satellite' | 'rocket_body' | 'debris' | 'unknown';
   category: ObjectCategory;
   regime: OrbitalRegime;
