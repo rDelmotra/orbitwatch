@@ -52,6 +52,7 @@ export class Engine {
   private lastSimTimeUpdateAt = 0;
   private isDisposed = false;
   private criticalFailed = false;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -121,7 +122,11 @@ export class Engine {
     this.clock = new THREE.Clock();
 
     // ── Resize handler ────────────────────────────────────────────────────────
-    window.addEventListener('resize', this.onResize);
+    // ResizeObserver fires for any cause: window resize, tab/panel reflow,
+    // browser zoom, or moving to a different-DPI monitor — more reliable than
+    // the window 'resize' event which misses layout-driven size changes.
+    this.resizeObserver = new ResizeObserver(() => this.onResize());
+    this.resizeObserver.observe(canvas);
 
     // ── Input manager ─────────────────────────────────────────────────────────
     // Guarded: a critical satellites-init failure leaves no renderer (and has
@@ -490,6 +495,8 @@ export class Engine {
     const canvas = this.renderer.domElement;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
+    if (width === 0 || height === 0) return;
+    this.renderer.instance.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.cameraRig.resize(width, height);
     this.renderer.setSize(width, height);
   };
@@ -504,7 +511,7 @@ export class Engine {
     this.nav.dispose();
     this.trailUnsub?.();
     this.inputManager?.dispose();
-    window.removeEventListener('resize', this.onResize);
+    this.resizeObserver?.disconnect();
     // GPU picker references the satellite renderer's geometry — dispose it before
     // World disposes the SatellitesLayer.
     this.gpuPicker?.dispose();

@@ -10,7 +10,11 @@ export class Renderer {
   constructor(canvas: HTMLCanvasElement) {
     this.instance = new THREE.WebGLRenderer({ antialias: true, canvas });
     this.instance.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.instance.setSize(canvas.clientWidth, canvas.clientHeight);
+    // false = set the drawing-buffer size only; do NOT write inline style.width/
+    // height onto the canvas. With the default (true), three.js pins the canvas to
+    // fixed pixels, overriding the CSS `100%`, so it no longer follows its
+    // container and the ResizeObserver never fires on window resize.
+    this.instance.setSize(canvas.clientWidth, canvas.clientHeight, false);
     this.instance.outputColorSpace = THREE.SRGBColorSpace;
     this.instance.toneMapping = THREE.ACESFilmicToneMapping;
     this.instance.toneMappingExposure = 1.0;
