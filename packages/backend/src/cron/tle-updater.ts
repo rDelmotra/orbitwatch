@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { fetchFromSpaceTrack } from '../services/spacetrack.js';
 import { fetchCelesTrakTLEs } from '../services/celestrak.js';
 import { classifyObject } from '../services/classifier.js';
+import { buildOmm } from '../utils/omm.js';
 import { writeCache, readCache, isCacheFresh } from '../cache/file-cache.js';
 import { primeTlePayload } from '../cache/tle-payload-cache.js';
 import {
@@ -45,8 +46,10 @@ function buildFromSpaceTrack(
   const enriched: EnrichedTLEObject[] = [];
 
   for (const gp of gpElements) {
-    // Skip objects without TLE lines — they can't be propagated.
-    if (!gp.TLE_LINE1 || !gp.TLE_LINE2) continue;
+    // Build the OMM (validates every field json2satrec needs); skip if malformed.
+    const normEpoch = normaliseEpoch(gp.EPOCH);
+    const omm = buildOmm(gp, normEpoch);
+    if (!omm) continue;
 
     // Space-Track returns numeric fields as strings — parse explicitly.
     const period      = parseFloat(gp.PERIOD);
@@ -79,8 +82,7 @@ function buildFromSpaceTrack(
     enriched.push({
       noradId:     parseInt(gp.NORAD_CAT_ID, 10),
       name:        gp.OBJECT_NAME.trim(),
-      line1:       gp.TLE_LINE1,
-      line2:       gp.TLE_LINE2,
+      omm,
       objectType,
       category,
       regime,
@@ -91,7 +93,7 @@ function buildFromSpaceTrack(
       perigee:      isNaN(perigee)  ? 0 : perigee,
       inclination:  isNaN(inclination) ? 0 : inclination,
       rcsSize:      gp.RCS_SIZE     || null,
-      epoch:        normaliseEpoch(gp.EPOCH),
+      epoch:        normEpoch,
     });
   }
 
@@ -109,7 +111,9 @@ function buildFromCelesTrak(gpElements: CelesTrakGPElement[]): EnrichedTLEObject
   const enriched: EnrichedTLEObject[] = [];
 
   for (const gp of gpElements) {
-    if (!gp.TLE_LINE1 || !gp.TLE_LINE2) continue;
+    const normEpoch = normaliseEpoch(gp.EPOCH);
+    const omm = buildOmm(gp, normEpoch);
+    if (!omm) continue;
 
     const classifiable: ClassifiableObject = {
       period:      gp.PERIOD,
@@ -129,8 +133,7 @@ function buildFromCelesTrak(gpElements: CelesTrakGPElement[]): EnrichedTLEObject
     enriched.push({
       noradId:     gp.NORAD_CAT_ID,
       name:        gp.OBJECT_NAME.trim(),
-      line1:       gp.TLE_LINE1,
-      line2:       gp.TLE_LINE2,
+      omm,
       objectType,
       category,
       regime,
@@ -141,7 +144,7 @@ function buildFromCelesTrak(gpElements: CelesTrakGPElement[]): EnrichedTLEObject
       perigee:      gp.PERIAPSIS,
       inclination:  gp.INCLINATION,
       rcsSize:      gp.RCS_SIZE        ?? null,
-      epoch:        normaliseEpoch(gp.EPOCH),
+      epoch:        normEpoch,
     });
   }
 

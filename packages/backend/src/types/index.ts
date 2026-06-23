@@ -1,3 +1,8 @@
+import type { OMMJsonObject } from 'satellite.js';
+
+/** Re-export so both packages share one source of truth for the OMM shape. */
+export type { OMMJsonObject };
+
 // ============================================================
 // Shared type definitions for the backend
 // ============================================================
@@ -126,8 +131,7 @@ export type OrbitalRegime = 'LEO' | 'MEO' | 'GEO' | 'HEO' | 'OTHER';
 export interface EnrichedTLEObject {
   noradId: number;
   name: string;
-  line1: string;                 // TLE line 1 (for SGP4 propagation on client)
-  line2: string;                 // TLE line 2
+  omm: OMMJsonObject;            // OMM mean elements (for SGP4 propagation on client)
   objectType: ObjectType;
   category: ObjectCategory;
   regime: OrbitalRegime;
