@@ -11,15 +11,13 @@ const CATEGORY_LABELS: Record<ObjectCategory, string> = {
 };
 
 const panelStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 16,
-  right: 16,
-  width: 280,
+  width: '100%',
   padding: '14px 16px',
   background: 'rgba(0, 0, 0, 0.7)',
   backdropFilter: 'blur(4px)',
   border: '1px solid rgba(255, 255, 255, 0.1)',
-  borderRadius: 8,
+  borderTop: 'none',
+  borderRadius: '0 0 8px 8px',
   fontFamily: 'monospace',
   fontSize: '12px',
   color: 'rgba(255, 255, 255, 0.85)',

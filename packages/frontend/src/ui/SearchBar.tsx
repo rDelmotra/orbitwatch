@@ -18,6 +18,7 @@ export function SearchBar() {
   const catalogData = useStore((s) => s.catalogData);
   const selectByIndex = useStore((s) => s.selectByIndex);
   const loadingPhase = useStore((s) => s.loadingPhase);
+  const hasSelection = useStore((s) => !!(s.selectedSatellite || s.selectedDso));
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<FuseResult<EnrichedTLEObject>[]>([]);
@@ -131,6 +132,12 @@ export function SearchBar() {
 
   const showDropdown = isOpen && results.length > 0;
 
+  const dynamicInputStyle: React.CSSProperties = {
+    ...inputStyle,
+    borderRadius: hasSelection && !showDropdown ? '8px 8px 0 0' : '8px',
+    borderBottom: hasSelection && !showDropdown ? 'none' : '1px solid rgba(255, 255, 255, 0.1)',
+  };
+
   return (
     <div ref={containerRef} style={containerStyle}>
       <div style={inputWrapperStyle}>
@@ -143,7 +150,7 @@ export function SearchBar() {
           onChange={(e) => onQueryChange(e.target.value)}
           onFocus={() => setIsOpen(true)}
           onKeyDown={onKeyDown}
-          style={inputStyle}
+          style={dynamicInputStyle}
         />
       </div>
       {showDropdown && (
@@ -193,13 +200,10 @@ export function SearchBar() {
 // ── Styles ──────────────────────────────────────────────────────────────────────
 
 const containerStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 16,
-  left: '50%',
-  transform: 'translateX(-50%)',
-  width: 320,
+  position: 'relative',
+  width: '100%',
   pointerEvents: 'auto',
-  zIndex: 10,
+  zIndex: 20,
 };
 
 const inputWrapperStyle: React.CSSProperties = {
@@ -230,6 +234,10 @@ const inputStyle: React.CSSProperties = {
 };
 
 const dropdownStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: '100%',
+  left: 0,
+  right: 0,
   marginTop: 4,
   background: 'rgba(0, 0, 0, 0.85)',
   backdropFilter: 'blur(4px)',
@@ -237,6 +245,7 @@ const dropdownStyle: React.CSSProperties = {
   borderRadius: 8,
   overflow: 'hidden',
   maxHeight: 360,
+  zIndex: 20,
 };
 
 const resultItemStyle: React.CSSProperties = {

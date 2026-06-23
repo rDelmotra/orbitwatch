@@ -132,9 +132,22 @@ export default function App() {
           }}
         >
           <HUD />
-          <SearchBar />
           <FilterPanel />
-          <InfoCard />
+          <div
+            style={{
+              position: 'absolute',
+              top: 16,
+              right: 16,
+              width: 280,
+              display: 'flex',
+              flexDirection: 'column',
+              pointerEvents: 'none',
+              zIndex: 10,
+            }}
+          >
+            <SearchBar />
+            <InfoCard />
+          </div>
           <DsoLabels />
           <TimeController />
           <CompassStrip />
