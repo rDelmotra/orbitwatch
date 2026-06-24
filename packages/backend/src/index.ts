@@ -8,10 +8,17 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import tleRouter from './routes/tle.js';
 import dsoRouter, { summarizeDsoHealth } from './routes/dso.js';
-import { isCacheFresh, readVersion } from './cache/file-cache.js';
+import { isCacheFresh, readVersion, readCache } from './cache/file-cache.js';
 import { primeTlePayload } from './cache/tle-payload-cache.js';
 import { scheduleTLEUpdater } from './cron/tle-updater.js';
 import { readDsoManifest } from './dso/snapshot/index.js';
+import {
+  initHistory,
+  ingestCurrentGp,
+  historyRouter,
+  isHistoryEnabled,
+  isHistoryReady,
+} from './history/index.js';
 import { logger } from './utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +74,9 @@ app.use(express.json());
 
 app.use('/api/tle', tleRouter);
 app.use('/api/dso', dsoRouter);
+// Optional history routes — 503 cleanly when DATABASE_URL is unset, so mounting
+// unconditionally is safe.
+app.use('/api/history', historyRouter);
 
 // GET /health — used by load balancers and uptime monitors
 app.get('/health', async (_req, res) => {
@@ -107,8 +117,20 @@ if (isProd) {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   logger.info(`OrbitWatch backend listening on port ${PORT}`);
+
+  // Optional history DB: migrate + (best-effort) Timescale upgrade BEFORE the
+  // updater runs, so the first ingest sees a ready schema. Any failure is
+  // non-fatal — the TLE/DSO backend is untouched and /api/history/* 503s.
+  if (isHistoryEnabled()) {
+    try {
+      await initHistory();
+      logger.info('History DB ready (migrations applied)');
+    } catch (err) {
+      logger.error('History DB init failed (non-fatal — history disabled):', (err as Error).message);
+    }
+  }
 
   // If the cache is missing or older than the 24h TTL, kick off an immediate fetch.
   // The cron job is always scheduled so subsequent refreshes happen daily at 02:00 UTC.
@@ -122,6 +144,19 @@ app.listen(PORT, () => {
     // first /api/tle/all request doesn't pay the one-time rebuild. (The
     // immediate-fetch path warms via the cron updater after writeCache.)
     primeTlePayload();
+
+    // Seed today's history from the already-fresh cache so accumulation starts
+    // immediately even when no fetch runs this boot. Idempotent (ON CONFLICT
+    // keeps the latest epoch) and non-fatal. The immediate-fetch path instead
+    // ingests via the cron hook after writeCache.
+    if (isHistoryReady()) {
+      const cached = readCache();
+      if (cached) {
+        ingestCurrentGp(cached, null, 'cache').catch((err) =>
+          logger.error('History boot-seed failed (non-fatal):', (err as Error).message),
+        );
+      }
+    }
   }
 });
 

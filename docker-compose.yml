@@ -1,0 +1,35 @@
+# Local-only TimescaleDB for the OPTIONAL history feature (time-scrubbing).
+#
+# Production uses a managed Postgres (Railway / Timescale Cloud) via DATABASE_URL;
+# this compose file is purely a convenience for local development. The backend
+# runs perfectly fine without it — with DATABASE_URL unset, history is disabled
+# and /api/history/* returns 503.
+#
+# Usage:
+#   docker compose up -d
+#   # then in packages/backend/.env:
+#   #   DATABASE_URL=postgres://orbitwatch:orbitwatch@localhost:5432/orbitwatch
+#
+# Note: the timescaledb-ha image stores its data under /home/postgres/pgdata/data.
+
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg16
+    container_name: orbitwatch-timescaledb
+    environment:
+      POSTGRES_USER: orbitwatch
+      POSTGRES_PASSWORD: orbitwatch
+      POSTGRES_DB: orbitwatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - orbitwatch_pg:/home/postgres/pgdata/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbitwatch -d orbitwatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  orbitwatch_pg:

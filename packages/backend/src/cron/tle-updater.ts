@@ -13,6 +13,7 @@ import {
   ClassifiableObject,
 } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { ingestCurrentGp, isHistoryReady, type RawGpRecord } from '../history/index.js';
 
 // Cron schedule: "0 2 * * *" = 02:00 UTC every day.
 // Chosen to avoid peak hours and stay well away from adjacent cron runs.
@@ -177,12 +178,16 @@ export async function runUpdateCycle(): Promise<void> {
 
   let enriched: EnrichedTLEObject[] | null = null;
   let source = 'unknown';
+  // Raw provider records, captured for the optional history archive (the
+  // "source of truth" layer). Null unless a fetch succeeded.
+  let rawGp: RawGpRecord[] | null = null;
 
   // ── Primary: Space-Track ────────────────────────────────────────────────
   try {
     logger.info('Attempting Space-Track fetch (primary source)');
     const { gp, satcat } = await fetchFromSpaceTrack();
     enriched = buildFromSpaceTrack(gp, satcat);
+    rawGp = gp;
     source = 'space-track';
   } catch (primaryErr) {
     logger.error(
@@ -195,6 +200,7 @@ export async function runUpdateCycle(): Promise<void> {
       logger.info('Attempting CelesTrak fetch (fallback source)');
       const gp = await fetchCelesTrakTLEs();
       enriched = buildFromCelesTrak(gp);
+      rawGp = gp;
       source = 'celestrak';
     } catch (fallbackErr) {
       logger.error('CelesTrak fallback also failed:', (fallbackErr as Error).message);
@@ -216,6 +222,18 @@ export async function runUpdateCycle(): Promise<void> {
   // Re-warm the in-memory gzipped /api/tle/all payload in-process so the next
   // request serves from memory instead of paying the one-time rebuild.
   primeTlePayload();
+
+  // Fan the freshly-built catalog into the OPTIONAL history DB — reusing this one
+  // daily fetch, no second pull. Guarded by readiness and a swallowed catch so it
+  // can NEVER break the TLE serving path.
+  if (isHistoryReady()) {
+    try {
+      await ingestCurrentGp(enriched, rawGp, source);
+    } catch (err) {
+      logger.error('History ingest failed (non-fatal):', (err as Error).message);
+    }
+  }
+
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   logger.info(
     `TLE update complete: ${enriched.length} objects from ${source} in ${elapsed}s`,
