@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { EnrichedTLEObject, ObjectCategory, OrbitalRegime } from '../data/types';
 import type { DsoObject, DsoSnapshot } from '../data/dso-types';
 import type { VisualListSource, VisualListStatus } from '../data/visualList';
+import type { HistoryCoverage } from '../data/history-client';
 import type { DsoLabelPosition } from '../engine/DsoRenderer';
 import { simClock } from '../engine/SimClock';
 
@@ -131,6 +132,15 @@ interface AppState {
   jumpToSimTime: (date: Date) => void;
   resetSimClock: () => void;
   setTriggerSimTimeJump: (fn: () => void) => void;
+
+  // Historical time-scrub (review plane) — UI mirrors of Engine-held state.
+  historyCoverage: HistoryCoverage | null;
+  historyStatus: 'unknown' | 'available' | 'unavailable';
+  historyDay: string | null;     // null = live; else the loaded UTC day 'YYYY-MM-DD'
+  historyLoading: boolean;
+  setHistoryCoverage: (coverage: HistoryCoverage | null) => void;
+  setHistoryDay: (day: string | null) => void;
+  setHistoryLoading: (loading: boolean) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -306,6 +316,18 @@ export const useStore = create<AppState>((set) => ({
       return { simRate: 1, simTimeMs: simClock.now() };
     }),
   setTriggerSimTimeJump: (fn) => set({ triggerSimTimeJump: fn }),
+
+  historyCoverage: null,
+  historyStatus: 'unknown',
+  historyDay: null,
+  historyLoading: false,
+  setHistoryCoverage: (coverage) =>
+    set({
+      historyCoverage: coverage,
+      historyStatus: coverage && coverage.from ? 'available' : 'unavailable',
+    }),
+  setHistoryDay: (day) => set({ historyDay: day }),
+  setHistoryLoading: (loading) => set({ historyLoading: loading }),
 
   setDsoObjects: (objects) =>
     set((state) => ({

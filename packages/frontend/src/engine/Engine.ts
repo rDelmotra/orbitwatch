@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getSunDirection, getGAST } from '../orbital/time';
 import type { VisualListResolvedResult } from '../data/visualList';
-import { VisualListPoller } from '../data/tle-client';
+import { VisualListPoller, buildCatalogResult, type TleCatalogResult } from '../data/tle-client';
 import { bootstrapCatalog } from '../data/bootstrapCatalog';
+import { fetchHistoryCoverage, fetchHistoryDay, utcDay } from '../data/history-client';
 import type { EnrichedTLEObject } from '../data/types';
 import { useStore } from '../store/useStore';
 import { GPUPicker } from './GPUPicker';
@@ -28,6 +29,8 @@ import type { FrameContext } from './render/Layer';
 
 export class Engine {
   private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
+  /** Debounce window before a settled scrub triggers a catalog re-seed. */
+  private static readonly RESEED_DEBOUNCE_MS = 200;
 
   private renderer: Renderer;
   private scene: THREE.Scene;
@@ -53,6 +56,13 @@ export class Engine {
   private isDisposed = false;
   private criticalFailed = false;
   private resizeObserver: ResizeObserver | null = null;
+  // ── Historical time-scrub (A6) ──────────────────────────────────────────────
+  /** Cached live (bootstrap) catalog result for instant return to "now". */
+  private liveResult: TleCatalogResult | null = null;
+  /** UTC day the loaded catalog represents; null = live. */
+  private loadedDay: string | null = null;
+  private isReseeding = false;
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -188,6 +198,13 @@ export class Engine {
 
       this.catalogData = catalogData;
       this.inputManager?.setCatalogData(catalogData);
+
+      // Cache the live catalog (counts + tles) so returning to "now" is instant,
+      // and probe history coverage (non-blocking) to bound the scrubber later.
+      this.liveResult = buildCatalogResult(catalogData);
+      void fetchHistoryCoverage(apiUrl).then((cov) => {
+        if (!this.isDisposed) useStore.getState().setHistoryCoverage(cov);
+      });
 
       registerEngineCommands(this.buildEngineCommands());
 
@@ -408,6 +425,130 @@ export class Engine {
 
     // Refresh orbit trails at new time
     this.refreshOrbitTrail(useStore.getState());
+
+    // Bind the loaded catalog to the (possibly new) view-time day.
+    this.reconcileCatalogForTime();
+  }
+
+  // ── Historical time-scrub (A6) ──────────────────────────────────────────────
+
+  /** The UTC day the catalog SHOULD show for the current view-time; null = live. */
+  private computeDesiredDay(): string | null {
+    const cov = useStore.getState().historyCoverage;
+    const today = utcDay(Date.now());
+    const t = utcDay(simClock.now());
+    if (t >= today) return null;                    // live (today / future)
+    if (!cov || !cov.from || !cov.to) return null;  // no history → live only
+    if (t < cov.from) return cov.from;              // clamp to earliest available
+    if (t > cov.to) return cov.to;                  // recent past not yet ingested
+    return t;                                        // past day within coverage
+  }
+
+  /**
+   * Bind the loaded catalog to the view-time. Cheap + debounced: if the desired day
+   * differs from what's loaded, schedule a re-seed once the scrub settles (also
+   * coalesces play-driven day crossings ticked from the loop).
+   */
+  private reconcileCatalogForTime(): void {
+    if (this.isDisposed || this.criticalFailed) return;
+    if (this.computeDesiredDay() === this.loadedDay) return;
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      void this.runReseedToDesired();
+    }, Engine.RESEED_DEBOUNCE_MS);
+  }
+
+  private async runReseedToDesired(): Promise<void> {
+    if (this.isReseeding || this.isDisposed || this.criticalFailed) return;
+    const desiredDay = this.computeDesiredDay();
+    if (desiredDay === this.loadedDay) return;
+
+    this.isReseeding = true;
+    try {
+      if (desiredDay === null) await this.reseedToLive();
+      else await this.reseedToDay(desiredDay);
+    } catch (err) {
+      console.error('History catalog re-seed failed:', err);
+    } finally {
+      this.isReseeding = false;
+      // Time may have moved during the await → re-check.
+      if (!this.isDisposed && this.computeDesiredDay() !== this.loadedDay) {
+        this.reconcileCatalogForTime();
+      }
+    }
+  }
+
+  private async reseedToDay(day: string): Promise<void> {
+    const apiUrl = import.meta.env.VITE_API_URL ?? '';
+    useStore.getState().setHistoryLoading(true);
+    try {
+      const result = await fetchHistoryDay(apiUrl, day);
+      if (this.isDisposed) return;
+      if (!result) return; // out of coverage / network failure → keep current
+      this.applyCatalog(result, day);
+    } finally {
+      if (!this.isDisposed) useStore.getState().setHistoryLoading(false);
+    }
+  }
+
+  private async reseedToLive(): Promise<void> {
+    if (!this.liveResult) return;
+    this.applyCatalog(this.liveResult, null);
+  }
+
+  /**
+   * Swap the rendered catalog (live ↔ a historical day). Reuses the A1–A5 re-seed
+   * primitives, re-resolves the selection by noradId so "follow" survives the swap,
+   * and hides DSOs (current missions) while reviewing the past.
+   */
+  private applyCatalog(result: TleCatalogResult, day: string | null): void {
+    const { catalogData, tles, categoryCounts, regimeCounts } = result;
+    const store = useStore.getState();
+
+    // Capture selection (re-resolved by noradId) + trail intent BEFORE the swap.
+    const prevNorad = store.selectedSatellite?.noradId ?? null;
+    const prevShowTrail = store.showOrbitTrail;
+    const prevAltitude = store.selectedAltitude;
+
+    // Catalog swap (Engine-held + input + the per-frame TrackingSource read this).
+    this.catalogData = catalogData;
+    this.inputManager?.setCatalogData(catalogData);
+
+    // Render plane: renderer reinit (clears any ghost tail) + worker re-INIT (snaps).
+    this.world.runLayerCommand(this.satellitesLayer, 'reseed', () =>
+      this.satellitesLayer.reseedCatalog(catalogData, tles),
+    );
+
+    // Picker: TLE index space resized (geometry is shared + stable).
+    this.gpuPicker?.setCatalogSize(catalogData.length);
+
+    // DSOs are current missions → hidden while reviewing the past, restored on live.
+    this.world.runLayerCommand(this.dsoLayer, 'setHidden', () =>
+      this.dsoLayer.setHidden(day !== null),
+    );
+
+    // Store: catalog + counts so HUD / search / filters reflect the viewed day.
+    store.setCatalogData(catalogData);
+    store.setCatalogInfo({ objectCount: catalogData.length, categoryCounts, regimeCounts });
+
+    // Index-stability: the object set changes per day → re-resolve the selection by
+    // noradId. Following continues (nav reads selectedIndex live); preserve trail.
+    if (prevNorad !== null) {
+      const newIndex = catalogData.findIndex((o) => o.noradId === prevNorad);
+      if (newIndex >= 0) {
+        store.setSelectedSatellite(newIndex, catalogData[newIndex], prevAltitude);
+        if (prevShowTrail) store.setShowOrbitTrail(true);
+      } else {
+        store.setSelectedSatellite(null, null);
+      }
+    }
+
+    this.loadedDay = day;
+    store.setHistoryDay(day);
+
+    // Regenerate the orbit trail for the (re-resolved) selection at the new time.
+    this.refreshOrbitTrail();
   }
 
   start(): void {
@@ -486,6 +627,8 @@ export class Engine {
     if (wallNow - this.lastSimTimeUpdateAt > 250) {
       useStore.getState().setSimTimeMs(simClock.now());
       this.lastSimTimeUpdateAt = wallNow;
+      // Play-driven day crossings: bind the catalog to the advancing view-time.
+      this.reconcileCatalogForTime();
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -503,6 +646,10 @@ export class Engine {
 
   dispose(): void {
     this.isDisposed = true;
+    if (this.reconcileTimer) {
+      clearTimeout(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
     stopDsoClient();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
