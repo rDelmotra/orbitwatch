@@ -345,6 +345,7 @@ export function TimeScrubber() {
   const simRate = useStore((s) => s.simRate);
   const viewMode = useStore((s) => s.viewMode);
   const scrubberMode = useStore((s) => s.scrubberMode);
+  const planetarium = useStore((s) => s.planetarium);
   const setScrubberMode = useStore((s) => s.setScrubberMode);
   const setSimRate = useStore((s) => s.setSimRate);
   const returnToPresent = useStore((s) => s.returnToPresent);
@@ -417,6 +418,26 @@ export function TimeScrubber() {
             ))}
           </div>
         </>
+      )}
+
+      {/* Out-of-window hint: the planetarium is intentional, not a broken view. */}
+      {planetarium && (
+        <div
+          style={{
+            ...glass,
+            position: 'absolute',
+            bottom: 60,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            padding: '4px 12px',
+            borderRadius: 8,
+            fontSize: 11,
+            color: 'rgba(255,255,255,0.62)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          No catalog for this date — showing sky only
+        </div>
       )}
 
       {/* Bottom control cluster — always present once ready. */}

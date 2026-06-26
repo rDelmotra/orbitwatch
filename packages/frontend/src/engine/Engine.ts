@@ -245,7 +245,16 @@ export class Engine {
             getVisualNoradIds: () => this.getVisualNoradIds(),
             onError: (err, phase) =>
               this.world.reportLayerFailure(this.satellitesLayer, err, phase),
-            onReady: () => useStore.getState().setLoadingPhase('propagating'),
+            onReady: () => {
+              // Only the INITIAL boot drives the loading phase. A re-seed (history
+              // scrub / return-to-present) re-emits READY too, but must NOT flip back
+              // to 'propagating' — that unmounts every ready-gated overlay (HUD,
+              // TimeScrubber, …) and never recovers (the first-position latch fires
+              // once). Re-seeds are seamless; the snap repaints in place.
+              if (useStore.getState().loadingPhase !== 'ready') {
+                useStore.getState().setLoadingPhase('propagating');
+              }
+            },
             onFirstPosition: () => {
               this.inputManager?.setFirstPositionReceived(true);
               useStore.getState().setLoadingPhase('ready');
@@ -573,6 +582,7 @@ export class Engine {
 
     this.loadedTarget = { kind: 'hidden' };
     store.setHistoryDay(null);
+    store.setPlanetarium(true);
     this.refreshOrbitTrail();
   }
 
@@ -630,6 +640,7 @@ export class Engine {
 
     this.loadedTarget = day !== null ? { kind: 'day', day } : { kind: 'live' };
     store.setHistoryDay(day);
+    store.setPlanetarium(false);
 
     // Regenerate the orbit trail for the (re-resolved) selection at the new time.
     this.refreshOrbitTrail();

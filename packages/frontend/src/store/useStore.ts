@@ -162,9 +162,12 @@ interface AppState {
   historyStatus: 'unknown' | 'available' | 'unavailable';
   historyDay: string | null;     // null = live; else the loaded UTC day 'YYYY-MM-DD'
   historyLoading: boolean;
+  /** True while reviewing a date with NO satellite catalog (planetarium: sky only). */
+  planetarium: boolean;
   setHistoryCoverage: (coverage: HistoryCoverage | null) => void;
   setHistoryDay: (day: string | null) => void;
   setHistoryLoading: (loading: boolean) => void;
+  setPlanetarium: (on: boolean) => void;
 
   // DSO actions
   setDsoObjects: (objects: DsoObject[]) => void;
@@ -393,6 +396,7 @@ export const useStore = create<AppState>((set) => ({
   historyStatus: 'unknown',
   historyDay: null,
   historyLoading: false,
+  planetarium: false,
   setHistoryCoverage: (coverage) =>
     set({
       historyCoverage: coverage,
@@ -400,6 +404,7 @@ export const useStore = create<AppState>((set) => ({
     }),
   setHistoryDay: (day) => set({ historyDay: day }),
   setHistoryLoading: (loading) => set({ historyLoading: loading }),
+  setPlanetarium: (on) => set({ planetarium: on }),
 
   setDsoObjects: (objects) =>
     set((state) => ({
