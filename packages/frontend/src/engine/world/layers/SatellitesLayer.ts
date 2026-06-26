@@ -38,6 +38,8 @@ export class SatellitesLayer implements Layer {
   private firstPositionReceived = false;
   private callbacks: SatellitesLayerCallbacks | null = null;
   private filterUnsub: (() => void) | null = null;
+  /** True while satellites are hidden for a planetarium (uncovered-past) scrub. */
+  private hidden = false;
 
   /**
    * The satellite renderer, or null if init hasn't run / failed. Nullable on
@@ -164,6 +166,10 @@ export class SatellitesLayer implements Layer {
     // Runs in the worker's onmessage turn (outside World) — guard escalates any
     // throw in the heavy path to the critical-error route. (P1)
     this.guard('onPositions', () => {
+      // Planetarium: while hidden (uncovered past) skip all render/count work so no
+      // stale counts leak. Only entered post-boot (boot is always live), so the
+      // firstPosition handshake below is never starved.
+      if (this.hidden) return;
       const renderer = this._renderer;
       const callbacks = this.callbacks;
       if (!renderer || !callbacks) return;
@@ -224,7 +230,8 @@ export class SatellitesLayer implements Layer {
       !this._renderer ||
       !this.callbacks ||
       !this.firstPositionReceived ||
-      this.catalog.length === 0
+      this.catalog.length === 0 ||
+      this.hidden
     ) {
       return;
     }
@@ -269,7 +276,7 @@ export class SatellitesLayer implements Layer {
   }
 
   update(frame: FrameContext): void {
-    if (!this._renderer) return;
+    if (!this._renderer || this.hidden) return;
 
     this._renderer.material.uniforms.uT.value = frame.uT;
 
@@ -352,6 +359,20 @@ export class SatellitesLayer implements Layer {
     }
 
     this.client.reseed(tles);
+  }
+
+  /**
+   * Planetarium hide/show for an uncovered-past scrub: the point cloud goes
+   * invisible and the per-frame + worker-driven paths early-out
+   * (`onPositions`/`update`/`recomputeVisibleCounts`), so no stale counts leak
+   * while hidden. The Engine owns the surrounding orchestration (picker size 0,
+   * zeroed store counts, cleared selection) and re-seeds on restore. Mirrors
+   * {@link DsoLayer.setHidden}.
+   */
+  setHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return;
+    this.hidden = hidden;
+    if (this._renderer) this._renderer.mesh.visible = !hidden;
   }
 
   /** Best-estimate propagation timestamp for the orbit-trail anchor. */

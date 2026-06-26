@@ -27,10 +27,25 @@ import { DomeSkyLayer } from './world/layers/DomeSkyLayer';
 import { registerEngineCommands, type EngineCommands } from './command/EngineCommands';
 import type { FrameContext } from './render/Layer';
 
+/** What the satellite render plane currently shows for the view-time. */
+type CatalogTarget =
+  | { kind: 'live' }
+  | { kind: 'day'; day: string }
+  | { kind: 'hidden' };
+
+/** Symmetric ease for the return-to-present glide (no overshoot — never passes "now"). */
+function easeInOutCubic(p: number): number {
+  return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+}
+
 export class Engine {
   private static readonly EMPTY_NORAD_SET: Set<number> = new Set();
   /** Debounce window before a settled scrub triggers a catalog re-seed. */
   private static readonly RESEED_DEBOUNCE_MS = 200;
+  /** "Return to present" glide duration. */
+  private static readonly GLIDE_DURATION_MS = 1200;
+  /** Min gap between scrub/glide-driven satellite snaps (~11 Hz). */
+  private static readonly SCRUB_SNAP_MIN_MS = 90;
 
   private renderer: Renderer;
   private scene: THREE.Scene;
@@ -56,13 +71,19 @@ export class Engine {
   private isDisposed = false;
   private criticalFailed = false;
   private resizeObserver: ResizeObserver | null = null;
-  // ── Historical time-scrub (A6) ──────────────────────────────────────────────
+  // ── Historical time-scrub (A6) + planetarium / glide (Pass 2) ───────────────
   /** Cached live (bootstrap) catalog result for instant return to "now". */
   private liveResult: TleCatalogResult | null = null;
-  /** UTC day the loaded catalog represents; null = live. */
-  private loadedDay: string | null = null;
+  /** Which catalog the render plane currently shows. */
+  private loadedTarget: CatalogTarget = { kind: 'live' };
   private isReseeding = false;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Active "return to present" glide (Pass 2), advanced by the rAF loop. */
+  private glide: { fromMs: number; startedAt: number; durationMs: number } | null = null;
+  /** Throttle clock for scrub/glide-driven satellite snaps. */
+  private lastScrubSnapAt = 0;
+  /** Last wheel scrub-preview time — defers the loop reseed mid-drag (reseed on settle). */
+  private lastScrubAt = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -356,6 +377,8 @@ export class Engine {
       flyToDso: (dsoId) => this.nav.flyToDso(dsoId),
       joyrideDso: (dsoId) => this.nav.joyrideDso(dsoId),
       simTimeJump: () => this.onSimTimeJump(),
+      scrubPreview: () => this.onScrubPreview(),
+      returnToPresent: () => this.startGlideToLive(),
     };
   }
 
@@ -430,28 +453,41 @@ export class Engine {
     this.reconcileCatalogForTime();
   }
 
-  // ── Historical time-scrub (A6) ──────────────────────────────────────────────
+  // ── Historical time-scrub (A6) + planetarium / glide (Pass 2) ───────────────
 
-  /** The UTC day the catalog SHOULD show for the current view-time; null = live. */
-  private computeDesiredDay(): string | null {
+  /** What the catalog SHOULD show for the current view-time. */
+  private computeTarget(): CatalogTarget {
     const cov = useStore.getState().historyCoverage;
     const today = utcDay(Date.now());
     const t = utcDay(simClock.now());
-    if (t >= today) return null;                    // live (today / future)
-    if (!cov || !cov.from || !cov.to) return null;  // no history → live only
-    if (t < cov.from) return cov.from;              // clamp to earliest available
-    if (t > cov.to) return cov.to;                  // recent past not yet ingested
-    return t;                                        // past day within coverage
+    if (t >= today) return { kind: 'live' };                      // today / future → current elements
+    if (!cov || !cov.from || !cov.to) return { kind: 'hidden' };  // no history → planetarium
+    if (t < cov.from) return { kind: 'hidden' };                  // before coverage → planetarium
+    if (t > cov.to) return { kind: 'live' };                      // recent gap not yet ingested → current
+    return { kind: 'day', day: t };                               // covered past day
+  }
+
+  /** Stable comparison key for a target (so scrubbing across uncovered days never churns). */
+  private static targetKey(t: CatalogTarget): string {
+    return t.kind === 'day' ? t.day : t.kind;
+  }
+
+  /** The UTC day the loaded catalog is valid for, or null when hidden (→ never snap). */
+  private loadedDayForSnap(): string | null {
+    const lt = this.loadedTarget;
+    if (lt.kind === 'hidden') return null;
+    if (lt.kind === 'day') return lt.day;
+    return utcDay(Date.now()); // live
   }
 
   /**
-   * Bind the loaded catalog to the view-time. Cheap + debounced: if the desired day
-   * differs from what's loaded, schedule a re-seed once the scrub settles (also
-   * coalesces play-driven day crossings ticked from the loop).
+   * Bind the loaded catalog to the view-time. Cheap + debounced: if the desired
+   * target differs from what's loaded, schedule a re-seed once the scrub settles
+   * (also coalesces play/glide-driven crossings ticked from the loop).
    */
   private reconcileCatalogForTime(): void {
     if (this.isDisposed || this.criticalFailed) return;
-    if (this.computeDesiredDay() === this.loadedDay) return;
+    if (Engine.targetKey(this.computeTarget()) === Engine.targetKey(this.loadedTarget)) return;
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = null;
@@ -461,19 +497,23 @@ export class Engine {
 
   private async runReseedToDesired(): Promise<void> {
     if (this.isReseeding || this.isDisposed || this.criticalFailed) return;
-    const desiredDay = this.computeDesiredDay();
-    if (desiredDay === this.loadedDay) return;
+    const target = this.computeTarget();
+    if (Engine.targetKey(target) === Engine.targetKey(this.loadedTarget)) return;
 
     this.isReseeding = true;
     try {
-      if (desiredDay === null) await this.reseedToLive();
-      else await this.reseedToDay(desiredDay);
+      if (target.kind === 'live') await this.reseedToLive();
+      else if (target.kind === 'hidden') this.applyHidden();
+      else await this.reseedToDay(target.day);
     } catch (err) {
       console.error('History catalog re-seed failed:', err);
     } finally {
       this.isReseeding = false;
       // Time may have moved during the await → re-check.
-      if (!this.isDisposed && this.computeDesiredDay() !== this.loadedDay) {
+      if (
+        !this.isDisposed &&
+        Engine.targetKey(this.computeTarget()) !== Engine.targetKey(this.loadedTarget)
+      ) {
         this.reconcileCatalogForTime();
       }
     }
@@ -498,6 +538,45 @@ export class Engine {
   }
 
   /**
+   * Planetarium: an uncovered-past view-time has no catalog → hide satellites +
+   * DSOs and keep the sky (Earth/sun/stars are pure functions of the clock). The
+   * worker keeps running but its render/count paths early-out while hidden
+   * (SatellitesLayer.setHidden), so no stale counts leak; restoring re-seeds.
+   */
+  private applyHidden(): void {
+    const store = useStore.getState();
+
+    this.world.runLayerCommand(this.satellitesLayer, 'setHidden', () =>
+      this.satellitesLayer.setHidden(true),
+    );
+    this.world.runLayerCommand(this.dsoLayer, 'setHidden', () => this.dsoLayer.setHidden(true));
+    this.gpuPicker?.setCatalogSize(0);
+
+    // Nothing is selectable / trackable in the planetarium past.
+    this.catalogData = [];
+    this.inputManager?.setCatalogData([]);
+    store.setSelectedSatellite(null, null);
+    store.setSelectedDso(null);
+    store.setCatalogData([]);
+    store.setCatalogInfo({
+      objectCount: 0,
+      categoryCounts: {
+        active_satellite: 0,
+        inactive_satellite: 0,
+        rocket_body: 0,
+        debris: 0,
+        unknown: 0,
+        deep_space: 0,
+      },
+      regimeCounts: { LEO: 0, MEO: 0, GEO: 0, HEO: 0, OTHER: 0 },
+    });
+
+    this.loadedTarget = { kind: 'hidden' };
+    store.setHistoryDay(null);
+    this.refreshOrbitTrail();
+  }
+
+  /**
    * Swap the rendered catalog (live ↔ a historical day). Reuses the A1–A5 re-seed
    * primitives, re-resolves the selection by noradId so "follow" survives the swap,
    * and hides DSOs (current missions) while reviewing the past.
@@ -510,6 +589,11 @@ export class Engine {
     const prevNorad = store.selectedSatellite?.noradId ?? null;
     const prevShowTrail = store.showOrbitTrail;
     const prevAltitude = store.selectedAltitude;
+
+    // Coming back from the planetarium (hidden) → make the point cloud visible again.
+    this.world.runLayerCommand(this.satellitesLayer, 'setHidden', () =>
+      this.satellitesLayer.setHidden(false),
+    );
 
     // Catalog swap (Engine-held + input + the per-frame TrackingSource read this).
     this.catalogData = catalogData;
@@ -544,11 +628,74 @@ export class Engine {
       }
     }
 
-    this.loadedDay = day;
+    this.loadedTarget = day !== null ? { kind: 'day', day } : { kind: 'live' };
     store.setHistoryDay(day);
 
     // Regenerate the orbit trail for the (re-resolved) selection at the new time.
     this.refreshOrbitTrail();
+  }
+
+  // ── Scrub preview + return-to-present glide (Pass 2) ─────────────────────────
+
+  /**
+   * Day-aware throttled snap shared by the wheel scrub-preview and the glide: if the
+   * view-time is within the loaded catalog's day, snap satellites (they track the
+   * scrub); otherwise leave them be (the sky still moves) — the heavy reseed happens
+   * on settle / glide completion.
+   */
+  private softPropagateForScrub(): void {
+    const d = this.loadedDayForSnap();
+    if (d === null) return; // hidden → planetarium, no satellites
+    if (utcDay(simClock.now()) !== d) return; // out of the loaded day → sky-only
+    const now = performance.now();
+    if (now - this.lastScrubSnapAt < Engine.SCRUB_SNAP_MIN_MS) return;
+    this.lastScrubSnapAt = now;
+    this.world.runLayerCommand(this.satellitesLayer, 'requestImmediateSnap', () =>
+      this.satellitesLayer.requestImmediateSnap(),
+    );
+  }
+
+  /** Store hook during a wheel drag: the sky already follows simClock; nudge satellites. */
+  private onScrubPreview(): void {
+    if (this.isDisposed || this.criticalFailed) return;
+    // Mark active scrubbing so the loop defers reseeds until the drag settles.
+    this.lastScrubAt = performance.now();
+    this.softPropagateForScrub();
+  }
+
+  /** Begin the eased "return to present" glide (advanced by the rAF loop). */
+  private startGlideToLive(): void {
+    if (this.isDisposed || this.criticalFailed) return;
+    const fromMs = simClock.now();
+    // Already essentially live → snap (skip a pointless ~1.2s no-op glide).
+    if (Math.abs(Date.now() - fromMs) < 1000) {
+      useStore.getState().goLive();
+      return;
+    }
+    this.glide = { fromMs, startedAt: performance.now(), durationMs: Engine.GLIDE_DURATION_MS };
+  }
+
+  /** Advance the glide one frame (called from the loop, before anything reads the clock). */
+  private tickGlide(): void {
+    const g = this.glide;
+    if (!g) return;
+    const p = Math.min((performance.now() - g.startedAt) / g.durationMs, 1);
+    const e = easeInOutCubic(p);
+    const t = g.fromMs + (Date.now() - g.fromMs) * e; // ease toward the moving live edge
+    simClock.jumpTo(new Date(t));
+    this.softPropagateForScrub();
+
+    const wallNow = performance.now();
+    if (wallNow - this.lastSimTimeUpdateAt > 100) {
+      useStore.getState().setSimTimeMs(simClock.now());
+      this.lastSimTimeUpdateAt = wallNow;
+    }
+
+    if (p >= 1) {
+      this.glide = null;
+      // Snap exactly to live (rate 1, viewMode live) + reseed the live catalog.
+      useStore.getState().goLive();
+    }
   }
 
   start(): void {
@@ -588,6 +735,11 @@ export class Engine {
   private loop = (): void => {
     this.animationId = requestAnimationFrame(this.loop);
     const delta = this.clock.getDelta();
+
+    // Pass 2: advance the "return to present" glide (eases simClock toward now)
+    // BEFORE anything this frame reads the clock.
+    if (this.glide) this.tickGlide();
+
     const now = simClock.date();
 
     const sunDir = getSunDirection(now);
@@ -630,7 +782,11 @@ export class Engine {
       store.setWallClockMs(Date.now()); // the always-advancing live edge
       this.lastSimTimeUpdateAt = wallNow;
       // Play-driven day crossings: bind the catalog to the advancing view-time.
-      this.reconcileCatalogForTime();
+      // Suppressed mid-glide (the glide reseeds on landing) and mid-scrub (reseed
+      // on settle — the wheel commits via reviewAt on release).
+      if (!this.glide && wallNow - this.lastScrubAt > Engine.RESEED_DEBOUNCE_MS) {
+        this.reconcileCatalogForTime();
+      }
     }
 
     this.renderer.render(this.scene, this.camera);

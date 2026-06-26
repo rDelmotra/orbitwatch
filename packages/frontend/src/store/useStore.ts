@@ -133,16 +133,26 @@ interface AppState {
   /** Wall-clock now (ms) — the always-advancing live edge; pushed ~4 Hz by the loop. */
   wallClockMs: number;
   triggerSimTimeJump: (() => void) | null;
+  /** Engine hook for a light scrub preview (day-aware throttled snap), set by the Engine. */
+  triggerScrubPreview: (() => void) | null;
+  /** Engine hook to animate the view-clock back to now, set by the Engine. */
+  triggerReturnToPresent: (() => void) | null;
   setSimRate: (rate: number) => void;
   setSimTimeMs: (ms: number) => void;
   setWallClockMs: (ms: number) => void;
   jumpToSimTime: (date: Date) => void;
   /** Scrub the view-clock to an absolute instant (enters review). */
   reviewAt: (date: Date) => void;
+  /** Live scrub preview while dragging — moves the clock (sky) without the heavy snap. */
+  scrubPreview: (date: Date) => void;
   /** Snap back to the live present (rate 1, view tracks now). */
   goLive: () => void;
+  /** Smoothly glide back to the live present (Engine-driven; instant fallback). */
+  returnToPresent: () => void;
   resetSimClock: () => void;
   setTriggerSimTimeJump: (fn: () => void) => void;
+  setTriggerScrubPreview: (fn: () => void) => void;
+  setTriggerReturnToPresent: (fn: () => void) => void;
 
   // Historical time-scrub (review plane) — UI mirrors of Engine-held state.
   historyCoverage: HistoryCoverage | null;
@@ -309,6 +319,8 @@ export const useStore = create<AppState>((set) => ({
   viewMode: 'live',
   wallClockMs: Date.now(),
   triggerSimTimeJump: null,
+  triggerScrubPreview: null,
+  triggerReturnToPresent: null,
   setSimRate: (rate) =>
     set((state) => {
       simClock.setRate(rate);
@@ -334,8 +346,29 @@ export const useStore = create<AppState>((set) => ({
       state.triggerSimTimeJump?.();
       return { simTimeMs: simClock.now(), viewMode: 'review' };
     }),
+  scrubPreview: (date) =>
+    set((state) => {
+      // Move the view-clock (the sky follows every frame) WITHOUT the heavy snap/
+      // reconcile. Satellites get a day-aware throttled snap via the Engine hook;
+      // the full reseed happens on release (reviewAt).
+      simClock.jumpTo(date);
+      state.triggerScrubPreview?.();
+      return { simTimeMs: simClock.now(), viewMode: 'review' };
+    }),
   goLive: () =>
     set((state) => {
+      simClock.reset();
+      state.triggerSimTimeJump?.();
+      return { simRate: 1, simTimeMs: simClock.now(), viewMode: 'live' };
+    }),
+  returnToPresent: () =>
+    set((state) => {
+      // Prefer the Engine's eased glide; fall back to an instant snap when no engine
+      // is attached (e.g. before bootstrap). The glide calls goLive() on landing.
+      if (state.triggerReturnToPresent) {
+        state.triggerReturnToPresent();
+        return {};
+      }
       simClock.reset();
       state.triggerSimTimeJump?.();
       return { simRate: 1, simTimeMs: simClock.now(), viewMode: 'live' };
@@ -348,6 +381,8 @@ export const useStore = create<AppState>((set) => ({
       return { simRate: 1, simTimeMs: simClock.now(), viewMode: 'live' };
     }),
   setTriggerSimTimeJump: (fn) => set({ triggerSimTimeJump: fn }),
+  setTriggerScrubPreview: (fn) => set({ triggerScrubPreview: fn }),
+  setTriggerReturnToPresent: (fn) => set({ triggerReturnToPresent: fn }),
 
   historyCoverage: null,
   historyStatus: 'unknown',
