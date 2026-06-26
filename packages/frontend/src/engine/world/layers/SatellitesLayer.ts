@@ -328,6 +328,32 @@ export class SatellitesLayer implements Layer {
     if (this._renderer) this._renderer.material.uniforms.uT.value = 0.0;
   }
 
+  /**
+   * Re-seed the layer from a NEW catalog (historical time-scrub): rebuild the
+   * renderer's colors/pickIds in place — `reinitFromCatalog` clears any ghost tail
+   * a smaller catalog would leave — re-apply the ISS tint, and re-INIT the SGP4
+   * worker. Visible counts + positions refresh when the post-reseed SNAP arrives
+   * via `onPositions` (which reads the now-updated `this.catalog`). No-op before
+   * `activate()`. The Engine owns the surrounding orchestration (selection
+   * re-resolve, picker resize, store sync).
+   */
+  reseedCatalog(
+    catalog: EnrichedTLEObject[],
+    tles: ConstructorParameters<typeof Sgp4WorkerClient>[0],
+  ): void {
+    if (!this._renderer || !this.client) return;
+    this.catalog = catalog;
+    this._renderer.reinitFromCatalog(catalog);
+
+    const issIndex = catalog.findIndex((d) => d.noradId === 25544);
+    if (issIndex !== -1) {
+      this._renderer.setSatelliteColor(issIndex, 0.2, 1.0, 0.4);
+      this._renderer.setSatelliteSize(issIndex, 2.0);
+    }
+
+    this.client.reseed(tles);
+  }
+
   /** Best-estimate propagation timestamp for the orbit-trail anchor. */
   getPropagationTimestampMs(): number {
     return this.client?.getCurrentPropagationTimestampMs() ?? simClock.now();

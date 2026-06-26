@@ -42,6 +42,8 @@ export class SatelliteRenderer {
   private readonly multipliers: Float32Array;
   private readonly filterMask: Uint8Array;
   private readonly validFlags: Uint8Array;
+  /** Highest catalog length initialised so far — lets reinit clear a shrunk tail. */
+  private initializedCount = 0;
 
   constructor(scene: THREE.Scene) {
     const prevPositions = new Float32Array(MAX_OBJECTS * 3);
@@ -199,6 +201,41 @@ export class SatelliteRenderer {
 
     this.colorAttr.needsUpdate = true;
     this.pickIdAttr.needsUpdate = true;
+    this.initializedCount = objects.length;
+  }
+
+  /**
+   * Re-seed colors/pickIds from a NEW catalog (historical time-scrub). Buffers are
+   * fixed-size and propagation only writes [0,count), so a smaller catalog would
+   * otherwise leave the old tail [len, prevCount) rendering + pickable as ghost
+   * points. Clear that tail (size, validFlags, pickId, highlight), then run the
+   * normal init writes for [0,len).
+   */
+  reinitFromCatalog(objects: EnrichedTLEObject[]): void {
+    const prevCount = this.initializedCount;
+    const currSizeArr = this.currSizeAttr.array as Float32Array;
+    const prevSizeArr = this.prevSizeAttr.array as Float32Array;
+    const pickArr = this.pickIdAttr.array as Float32Array;
+    const highlightArr = this.highlightAttr.array as Float32Array;
+
+    for (let i = objects.length; i < prevCount; i++) {
+      currSizeArr[i] = 0;
+      prevSizeArr[i] = 0;
+      this.validFlags[i] = 0;
+      this.multipliers[i] = 1.0;
+      highlightArr[i] = 0;
+      pickArr[i * 3] = 0;
+      pickArr[i * 3 + 1] = 0;
+      pickArr[i * 3 + 2] = 0;
+    }
+    if (objects.length < prevCount) {
+      this.currSizeAttr.needsUpdate = true;
+      this.prevSizeAttr.needsUpdate = true;
+      this.highlightAttr.needsUpdate = true;
+    }
+
+    // Writes colors/pickIds for [0,len) and updates initializedCount.
+    this.initFromCatalog(objects);
   }
 
   updateUniforms(cameraDistance: number, pixelRatio: number): void {
