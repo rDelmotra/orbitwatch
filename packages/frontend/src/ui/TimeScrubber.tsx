@@ -59,6 +59,16 @@ function pad(n: number, len = 2): string {
   return String(n).padStart(len, '0');
 }
 
+/** Inject the pill-pulse keyframes once (avoids a <style> node re-rendering every frame). */
+function ensurePulseKeyframes(): void {
+  if (typeof document === 'undefined' || document.getElementById('ow-pill-pulse-kf')) return;
+  const el = document.createElement('style');
+  el.id = 'ow-pill-pulse-kf';
+  el.textContent =
+    '@keyframes ow-pill-pulse{0%,100%{box-shadow:0 0 0 0 rgba(99,179,237,0);}50%{box-shadow:0 0 0 5px rgba(99,179,237,0.22);}}';
+  document.head.appendChild(el);
+}
+
 // ── Styling ──────────────────────────────────────────────────────────────────
 
 const glass: React.CSSProperties = {
@@ -248,17 +258,23 @@ function ThumbWheel({ activeRef }: { activeRef: React.MutableRefObject<Field> })
     lastY.current = y;
     lastT.current = t;
 
+    let justStarted = false;
     if (!moved.current) {
       if (Math.abs(dyDown) < 1) return;
       moved.current = true;
-      // Grabbing the wheel parks the clock where you drop it.
-      if (useStore.getState().simRate !== 0) useStore.getState().setSimRate(0);
+      justStarted = true;
     }
 
     tickOffset.current += dyDown;
     applyTickTransform();
     if (dt > 0) vel.current = 0.7 * vel.current + 0.3 * (dyDown / dt);
-    applyTimeDelta(-dyDown);
+    applyTimeDelta(-dyDown); // scrubPreview → marks the scrub active in the Engine
+
+    // Park the clock where you drop it — AFTER the first preview, so the Engine's
+    // reconcile already sees an active scrub and won't re-seed mid-drag.
+    if (justStarted && useStore.getState().simRate !== 0) {
+      useStore.getState().setSimRate(0);
+    }
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
@@ -346,6 +362,7 @@ export function TimeScrubber() {
   const viewMode = useStore((s) => s.viewMode);
   const scrubberMode = useStore((s) => s.scrubberMode);
   const planetarium = useStore((s) => s.planetarium);
+  const historyLoading = useStore((s) => s.historyLoading);
   const setScrubberMode = useStore((s) => s.setScrubberMode);
   const setSimRate = useStore((s) => s.setSimRate);
   const returnToPresent = useStore((s) => s.returnToPresent);
@@ -356,6 +373,8 @@ export function TimeScrubber() {
     activeRef.current = f;
     setActiveField(f);
   };
+
+  useEffect(() => ensurePulseKeyframes(), []);
 
   // Pulse the "Return to Present" lifeline briefly when you first travel away.
   const [pulse, setPulse] = useState(false);
@@ -376,11 +395,6 @@ export function TimeScrubber() {
 
   return (
     <>
-      <style>{`@keyframes ow-pill-pulse {
-        0%, 100% { box-shadow: 0 0 0 0 rgba(99,179,237,0); }
-        50% { box-shadow: 0 0 0 5px rgba(99,179,237,0.22); }
-      }`}</style>
-
       {scrubberMode && (
         <>
           <TimePanel simTimeMs={simTimeMs} active={activeField} onSelect={selectField} />
@@ -420,8 +434,8 @@ export function TimeScrubber() {
         </>
       )}
 
-      {/* Out-of-window hint: the planetarium is intentional, not a broken view. */}
-      {planetarium && (
+      {/* Status hint: a day-fetch in progress, or the intentional planetarium void. */}
+      {(historyLoading || planetarium) && (
         <div
           style={{
             ...glass,
@@ -436,7 +450,7 @@ export function TimeScrubber() {
             whiteSpace: 'nowrap',
           }}
         >
-          No catalog for this date — showing sky only
+          {historyLoading ? 'Loading day…' : 'No catalog for this date — showing sky only'}
         </div>
       )}
 

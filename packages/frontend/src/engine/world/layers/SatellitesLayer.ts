@@ -351,6 +351,9 @@ export class SatellitesLayer implements Layer {
     if (!this._renderer || !this.client) return;
     this.catalog = catalog;
     this._renderer.reinitFromCatalog(catalog);
+    // Refresh dev-validation indices (ISS / GEO) for the new catalog — stale indices
+    // would validate the wrong objects after a re-seed.
+    this.devValidation?.initFromCatalog(catalog);
 
     const issIndex = catalog.findIndex((d) => d.noradId === 25544);
     if (issIndex !== -1) {
