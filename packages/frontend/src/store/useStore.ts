@@ -132,6 +132,8 @@ interface AppState {
   viewMode: ViewMode;
   /** Wall-clock now (ms) — the always-advancing live edge; pushed ~4 Hz by the loop. */
   wallClockMs: number;
+  /** Whether the modal time-scrubber (Star Walk wheel) is open (dims the rest of the HUD). */
+  scrubberMode: boolean;
   triggerSimTimeJump: (() => void) | null;
   /** Engine hook for a light scrub preview (day-aware throttled snap), set by the Engine. */
   triggerScrubPreview: (() => void) | null;
@@ -140,6 +142,7 @@ interface AppState {
   setSimRate: (rate: number) => void;
   setSimTimeMs: (ms: number) => void;
   setWallClockMs: (ms: number) => void;
+  setScrubberMode: (on: boolean) => void;
   jumpToSimTime: (date: Date) => void;
   /** Scrub the view-clock to an absolute instant (enters review). */
   reviewAt: (date: Date) => void;
@@ -318,6 +321,7 @@ export const useStore = create<AppState>((set) => ({
   simTimeMs: Date.now(),
   viewMode: 'live',
   wallClockMs: Date.now(),
+  scrubberMode: false,
   triggerSimTimeJump: null,
   triggerScrubPreview: null,
   triggerReturnToPresent: null,
@@ -334,6 +338,7 @@ export const useStore = create<AppState>((set) => ({
     }),
   setSimTimeMs: (ms) => set({ simTimeMs: ms }),
   setWallClockMs: (ms) => set({ wallClockMs: ms }),
+  setScrubberMode: (on) => set({ scrubberMode: on }),
   jumpToSimTime: (date) =>
     set((state) => {
       simClock.jumpTo(date);

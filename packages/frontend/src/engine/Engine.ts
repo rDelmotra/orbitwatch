@@ -774,7 +774,7 @@ export class Engine {
     };
     this.world.update(frame);
 
-    // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
+    // Push sim-time to store at ~4Hz for UI (HUD, TimeScrubber)
     const wallNow = performance.now();
     if (wallNow - this.lastSimTimeUpdateAt > 250) {
       const store = useStore.getState();
