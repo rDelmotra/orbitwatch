@@ -10,6 +10,8 @@ export type LoadingPhase = 'fetching' | 'initializing' | 'propagating' | 'ready'
 export type CameraMode = 'free' | 'flying' | 'following' | 'returning';
 export type TrackingStyle = 'follow' | 'joyride';
 export type VisibilityMode = 'all' | 'radio' | 'dome';
+/** Live = view-clock tracks wall-clock now; Review = scrubbed/playing away from now. */
+export type ViewMode = 'live' | 'review';
 
 /** Visibility modes that drive the observer-anchored sky camera (vs the globe view). */
 export function isObserverMode(mode: VisibilityMode): boolean {
@@ -126,10 +128,19 @@ interface AppState {
   // Simulation clock (UI mirrors — simClock is source of truth)
   simRate: number;
   simTimeMs: number;
+  /** First-class liveness: tracking now (live) vs scrubbed/playing away (review). */
+  viewMode: ViewMode;
+  /** Wall-clock now (ms) — the always-advancing live edge; pushed ~4 Hz by the loop. */
+  wallClockMs: number;
   triggerSimTimeJump: (() => void) | null;
   setSimRate: (rate: number) => void;
   setSimTimeMs: (ms: number) => void;
+  setWallClockMs: (ms: number) => void;
   jumpToSimTime: (date: Date) => void;
+  /** Scrub the view-clock to an absolute instant (enters review). */
+  reviewAt: (date: Date) => void;
+  /** Snap back to the live present (rate 1, view tracks now). */
+  goLive: () => void;
   resetSimClock: () => void;
   setTriggerSimTimeJump: (fn: () => void) => void;
 
@@ -295,25 +306,46 @@ export const useStore = create<AppState>((set) => ({
 
   simRate: 1,
   simTimeMs: Date.now(),
+  viewMode: 'live',
+  wallClockMs: Date.now(),
   triggerSimTimeJump: null,
   setSimRate: (rate) =>
     set((state) => {
       simClock.setRate(rate);
       state.triggerSimTimeJump?.();
-      return { simRate: rate, simTimeMs: simClock.now() };
+      // Leaving rate 1 means we're no longer tracking the live present.
+      return {
+        simRate: rate,
+        simTimeMs: simClock.now(),
+        viewMode: rate !== 1 ? 'review' : state.viewMode,
+      };
     }),
   setSimTimeMs: (ms) => set({ simTimeMs: ms }),
+  setWallClockMs: (ms) => set({ wallClockMs: ms }),
   jumpToSimTime: (date) =>
     set((state) => {
       simClock.jumpTo(date);
       state.triggerSimTimeJump?.();
       return { simTimeMs: simClock.now() };
     }),
-  resetSimClock: () =>
+  reviewAt: (date) =>
+    set((state) => {
+      simClock.jumpTo(date);
+      state.triggerSimTimeJump?.();
+      return { simTimeMs: simClock.now(), viewMode: 'review' };
+    }),
+  goLive: () =>
     set((state) => {
       simClock.reset();
       state.triggerSimTimeJump?.();
-      return { simRate: 1, simTimeMs: simClock.now() };
+      return { simRate: 1, simTimeMs: simClock.now(), viewMode: 'live' };
+    }),
+  resetSimClock: () =>
+    set((state) => {
+      // Thin alias of goLive — snap to the live present.
+      simClock.reset();
+      state.triggerSimTimeJump?.();
+      return { simRate: 1, simTimeMs: simClock.now(), viewMode: 'live' };
     }),
   setTriggerSimTimeJump: (fn) => set({ triggerSimTimeJump: fn }),
 

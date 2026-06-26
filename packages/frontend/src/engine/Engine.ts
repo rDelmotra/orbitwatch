@@ -625,7 +625,9 @@ export class Engine {
     // Push sim-time to store at ~4Hz for UI (HUD, TimeController)
     const wallNow = performance.now();
     if (wallNow - this.lastSimTimeUpdateAt > 250) {
-      useStore.getState().setSimTimeMs(simClock.now());
+      const store = useStore.getState();
+      store.setSimTimeMs(simClock.now());
+      store.setWallClockMs(Date.now()); // the always-advancing live edge
       this.lastSimTimeUpdateAt = wallNow;
       // Play-driven day crossings: bind the catalog to the advancing view-time.
       this.reconcileCatalogForTime();
