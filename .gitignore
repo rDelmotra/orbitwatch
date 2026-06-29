@@ -36,10 +36,12 @@ claude.md
 
 # ── IDEs & Messaging ─────────────────────────────────────────────────────────
 .claude/
+.agents/
 .idea/
 .vscode/
 !.vscode/extensions.json
 .history/
+*.md
 
 # ── System Files ─────────────────────────────────────────────────────────────
 .DS_Store
